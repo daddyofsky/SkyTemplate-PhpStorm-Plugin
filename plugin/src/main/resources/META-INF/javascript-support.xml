@@ -1,0 +1,31 @@
+<idea-plugin>
+    <extensions defaultExtensionNs="com.intellij">
+        <!-- `<script>` content is parsed by the JavaScript plugin into JS PSI
+             nodes (embedded into the surrounding HTML/XML file, not language
+             injection). Without a JavaScript-language registration here, our
+             reference / completion contributors never fire when the caret is
+             on a SkyTemplate identifier inside a `<script>` block — Ctrl+Click
+             on `serviceLimit` in `function f(){ {=serviceLimit('A1')} }` would
+             return no PHP-symbol reference. -->
+        <psi.referenceContributor
+            language="JavaScript"
+            implementation="com.novaframework.templatelang.reference.SkyTemplateReferenceContributor"/>
+        <completion.contributor
+            language="JavaScript"
+            implementationClass="com.novaframework.templatelang.reference.SkyTemplateCompletionContributor"/>
+
+        <!-- Override JavaScript's PairedBraceMatcher with one that ignores
+             `{` / `}` chars sitting inside a SkyTemplate construct in an
+             HTML / XML host file. Without this, JS would treat the template
+             braces as block delimiters — Ctrl+Shift+] would jump out of the
+             surrounding JS block via the template's `}`, brace-matching
+             highlight would tie the template's `{` to an unrelated JS `}`,
+             and `<script>` indent would miscount depth past the template tag.
+             Filter is gated on host fileType (HTML / XML); standalone `*.js`
+             is unaffected. -->
+        <lang.braceMatcher
+            language="JavaScript"
+            implementationClass="com.novaframework.templatelang.sky.SkyTemplateAwareJsBraceMatcher"
+            order="first"/>
+    </extensions>
+</idea-plugin>

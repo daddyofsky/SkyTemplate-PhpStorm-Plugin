@@ -1,0 +1,312 @@
+<idea-plugin>
+    <id>com.novaframework.skytemplate</id>
+    <name>SkyTemplate</name>
+    <vendor email="daddy@ubik.co.kr" url="https://nova-framework.dev">Nova Framework</vendor>
+
+    <description><![CDATA[
+        PhpStorm support for the <b>SkyTemplate</b> PHP template engine.
+        <ul>
+          <li>Syntax highlighting for SkyTemplate tags / variables / directives</li>
+          <li>Brace matching, block-comment toggle, attribute whitelist (<code>tpl-*</code>)</li>
+          <li>References to PHP functions, classes, methods, and constants used inside <code>{ … }</code></li>
+          <li>HTML / XML / JS error suppression where the source of the "error" is a SkyTemplate construct</li>
+        </ul>
+    ]]></description>
+
+    <depends>com.intellij.modules.platform</depends>
+    <depends>com.intellij.modules.lang</depends>
+    <depends>com.intellij.modules.xml</depends>
+    <depends>com.jetbrains.php</depends>
+    <depends optional="true" config-file="javascript-support.xml">JavaScript</depends>
+    <depends optional="true" config-file="css-support.xml">com.intellij.css</depends>
+
+    <extensions defaultExtensionNs="com.intellij">
+        <!-- Project Settings → Tools → SkyTemplate -->
+        <projectService
+            serviceImplementation="com.novaframework.templatelang.settings.TemplateLangSettings"/>
+        <projectConfigurable
+            parentId="tools"
+            instance="com.novaframework.templatelang.settings.TemplateLangConfigurable"
+            id="com.novaframework.skytemplate.settings"
+            displayName="SkyTemplate"/>
+
+        <!-- On project open, mark `templateRoot` as a Resource Root if the
+             user has enabled the auto-mark toggle in Settings. Idempotent. -->
+        <postStartupActivity
+            implementation="com.novaframework.templatelang.settings.TemplateRootStartupActivity"/>
+
+        <!-- SkyTemplate -->
+        <fileType
+            name="SkyTemplate"
+            implementationClass="com.novaframework.templatelang.sky.SkyTemplateFileType"
+            fieldName="INSTANCE"
+            language="SkyTemplate"
+            extensions="sky"/>
+
+        <lang.parserDefinition
+            language="SkyTemplate"
+            implementationClass="com.novaframework.templatelang.sky.SkyTemplateParserDefinition"/>
+
+        <lang.syntaxHighlighterFactory
+            language="SkyTemplate"
+            implementationClass="com.novaframework.templatelang.sky.SkyTemplateSyntaxHighlighterFactory"/>
+
+        <colorSettingsPage
+            implementation="com.novaframework.templatelang.sky.SkyTemplateColorSettingsPage"/>
+
+        <lang.commenter
+            language="SkyTemplate"
+            implementationClass="com.novaframework.templatelang.sky.SkyTemplateCommenter"/>
+
+        <lang.braceMatcher
+            language="SkyTemplate"
+            implementationClass="com.novaframework.templatelang.sky.SkyTemplateBraceMatcher"/>
+
+        <!-- Code folding for `{loop}/{if}/{foreach}/…/{/}` block tags and
+             multi-line `{*…*}` comments. Registered for SkyTemplate (covers
+             `*.sky` / `*.skyhtml`) and for HTML / XML (covers `*.html` /
+             `*.htm` / `*.xml` host files where SkyTemplate constructs are
+             embedded as plain text). The builder de-duplicates against the
+             multi-tree case internally. -->
+        <lang.foldingBuilder
+            language="SkyTemplate"
+            implementationClass="com.novaframework.templatelang.sky.SkyTemplateFoldingBuilder"/>
+        <lang.foldingBuilder
+            language="HTML"
+            implementationClass="com.novaframework.templatelang.sky.SkyTemplateFoldingBuilder"/>
+
+        <!-- Enter handler: auto-indent + auto-`{/}` after opening block tags
+             (`{loop …}`, `{if …}`, `{foreach …}`, `{for …}`, `{while …}`,
+             `{else}`, `{elseif …}`, `{?…}`, `{:…}`, `{@…}`, `{%…}`). The
+             handler internally restricts itself to `*.sky` / `*.skyhtml`
+             files; HTML hosts keep their default Enter behaviour. -->
+        <enterHandlerDelegate
+            implementation="com.novaframework.templatelang.sky.SkyTemplateEnterHandler"/>
+
+        <!-- For *.sky / *.skyhtml files (where SkyTemplate is the file type):
+             multi-tree provider keeps HTML / JS / CSS PSI alongside SkyTemplate. -->
+        <fileType.fileViewProviderFactory
+            filetype="SkyTemplate"
+            implementationClass="com.novaframework.templatelang.sky.SkyTemplateFileViewProviderFactory"/>
+
+        <!-- Layered editor highlighter for *.sky files. -->
+        <editorHighlighterProvider
+            filetype="SkyTemplate"
+            implementationClass="com.novaframework.templatelang.sky.SkyTemplateEditorHighlighterProvider"/>
+
+        <!-- For *.html / *.htm files: keep HTML as the primary file type so that
+             HTML/JS live templates, Emmet, completion, inspections, and every
+             other built-in HTML feature remain intact. We only ADD visual
+             highlighting for SkyTemplate tokens via an annotator. -->
+        <annotator language="HTML"
+                   implementationClass="com.novaframework.templatelang.sky.SkyTemplateAnnotator"/>
+
+        <!-- Drop HTML/XML errors and warnings whose range overlaps a SkyTemplate
+             construct (e.g. `{?disabled}` in attribute position). -->
+        <daemon.highlightInfoFilter
+            implementation="com.novaframework.templatelang.sky.SkyTemplateHtmlErrorFilter"/>
+
+        <!-- Whitelist `tpl-*` attributes so HtmlUnknownAttribute stays silent. -->
+        <xml.attributeDescriptorsProvider
+            implementation="com.novaframework.templatelang.sky.SkyTemplateAttributeDescriptorsProvider"/>
+
+        <!-- M4: PHP-symbol references inside template `{ … }` constructs.
+             Registers PsiReference for function calls, classes, methods,
+             constants and class constants — PhpStorm's Find Usages then
+             includes template hits, and Ctrl+Click jumps to the PHP defn.
+
+             Why three language registrations:
+               - SkyTemplate covers the `*.sky` token leaves (SkyTemplate
+                 language).
+               - HTML covers the wrapping HTML elements in `*.html` host
+                 files — `XmlText`, `HtmlTag`, `HtmlDocument`, `HtmlFile`
+                 all have language=HTML.
+               - XML covers the **leaf token** itself in `*.html` files.
+                 PhpStorm's HTML PSI emits the `{=foo()}` chunk as a single
+                 `XmlTokenImpl` whose `getLanguage()` returns XMLLanguage
+                 (not HTMLLanguage — HTML extends XML, so leaf tokens stay
+                 on the parent surface). Without this registration,
+                 `findReferenceAt` on the leaf returns null, and Find Usages
+                 misses top-level constructs that aren't wrapped in any tag
+                 (e.g. bare `{=foo()}` as a direct child of `HtmlDocument`)
+                 because the leaf-up walk hits no HTML-language ancestor
+                 before the document root, and Find Usages' leaf-level query
+                 stops short of walking that far. -->
+        <psi.referenceContributor
+            language="HTML"
+            implementation="com.novaframework.templatelang.reference.SkyTemplateReferenceContributor"/>
+        <psi.referenceContributor
+            language="XML"
+            implementation="com.novaframework.templatelang.reference.SkyTemplateReferenceContributor"/>
+        <psi.referenceContributor
+            language="SkyTemplate"
+            implementation="com.novaframework.templatelang.reference.SkyTemplateReferenceContributor"/>
+
+        <!-- 0.5.30 — tell PhpStorm's "Unused declaration" daemon that a PHP
+             symbol is implicitly used when its name appears in any project
+             `.sky` / `.html` file. The daemon's ReferencesSearch fall-through
+             is restricted to the PHP-language file scope, so templates are
+             invisible to it without this hook (user demonstrated this even
+             literal `<?php foo2(); ?>` inside an .html host doesn't clear the
+             "unused" highlight unless .html is re-mapped to PHP file type).
+             Implementation queries the IntelliJ platform's word index via
+             PsiSearchHelper.processElementsWithWord — no custom index, no
+             listener, no daemon.restart. The 0.5.24~0.5.27 attempts had all
+             three and proved fragile. -->
+        <implicitUsageProvider
+            implementation="com.novaframework.templatelang.reference.SkyTemplatePhpImplicitUsageProvider"/>
+        <useScopeEnlarger
+            implementation="com.novaframework.templatelang.reference.SkyTemplateUseScopeEnlarger"/>
+
+        <!-- 0.5.33 — explicit ReferencesSearch executor for PHP-symbol Find Usages
+             into SkyTemplate files. Companion to the psi.referenceContributor:
+             the contributor exposes refs at the PSI level so findReferenceAt
+             (Ctrl+Click) finds them via leaf-up walk; Find Usages goes through
+             ReferencesSearch instead, whose default executors iterate word-index
+             candidates and ask each leaf for refs. For an XmlAttributeValue like
+             `<a href="{=foo()}">`, the leaf returns no refs (HTML attaches refs
+             at the value-element level), so default search misses ours. This
+             executor walks leaf → parent on each candidate to surface our refs. -->
+        <referencesSearch
+            implementation="com.novaframework.templatelang.reference.SkyTemplateReferencesSearchExecutor"/>
+
+        <!-- WordsScanner for *.sky files so the platform's word index includes
+             SkyTemplate IDENTIFIER tokens. The implicit-usage provider above
+             relies on this; without it, only `.html` template hosts (already
+             covered by HTML's WordsScanner) would feed the index, and a
+             `function foo()` referenced only from `partial.sky` would still
+             be greyed as unused. -->
+        <lang.findUsagesProvider
+            language="SkyTemplate"
+            implementationClass="com.novaframework.templatelang.sky.SkyTemplateFindUsagesProvider"/>
+
+        <!-- M7 Inspections — structural diagnostics for SkyTemplate
+             directives. Registered against SkyTemplate, HTML, and XML so
+             the inspection runs in `*.sky` / `*.skyhtml` files AND in
+             plain HTML / XML host files where SkyTemplate constructs are
+             embedded. The inspection's isApplicable() dedupes multi-tree
+             files so each unpaired open is reported once. The pairing
+             logic is shared with SkyTemplateFoldingScanner so fold
+             rendering and inspection findings stay consistent. Both
+             inspections honour the master `Enable SkyTemplate support`
+             toggle in Project Settings → Tools → SkyTemplate. -->
+        <localInspection
+            language="SkyTemplate"
+            shortName="SkyTemplateUnclosedBlock"
+            displayName="Unclosed SkyTemplate block"
+            groupName="SkyTemplate"
+            enabledByDefault="true"
+            level="ERROR"
+            implementationClass="com.novaframework.templatelang.inspection.SkyTemplateUnclosedBlockInspection"/>
+        <localInspection
+            language="SkyTemplate"
+            shortName="SkyTemplateOrphanElse"
+            displayName="Orphan SkyTemplate {else} / branch"
+            groupName="SkyTemplate"
+            enabledByDefault="true"
+            level="ERROR"
+            implementationClass="com.novaframework.templatelang.inspection.SkyTemplateOrphanElseInspection"/>
+
+        <!-- M7+ scope / variable inspections (0.5.25). All three share
+             SkyTemplateScopeAnalyzer for the file walk and stack tracking
+             — each inspection just filters to its own diagnostic codes.
+             Activates in `*.sky` / `*.skyhtml`; HTML / XML host coverage
+             goes via SkyTemplateScopeAnnotator. -->
+        <localInspection
+            language="SkyTemplate"
+            shortName="SkyTemplateLoopScopeMismatch"
+            displayName="SkyTemplate loop-scope depth mismatch"
+            groupName="SkyTemplate"
+            enabledByDefault="true"
+            level="WARNING"
+            implementationClass="com.novaframework.templatelang.inspection.SkyTemplateLoopScopeInspection"/>
+        <localInspection
+            language="SkyTemplate"
+            shortName="SkyTemplateRedundantAt"
+            displayName="SkyTemplate redundant `@` modifier"
+            groupName="SkyTemplate"
+            enabledByDefault="true"
+            level="WARNING"
+            implementationClass="com.novaframework.templatelang.inspection.SkyTemplateRedundantAtInspection"/>
+        <localInspection
+            language="SkyTemplate"
+            shortName="SkyTemplateDuplicateElse"
+            displayName="SkyTemplate duplicate {else} branch"
+            groupName="SkyTemplate"
+            enabledByDefault="true"
+            level="WARNING"
+            implementationClass="com.novaframework.templatelang.inspection.SkyTemplateDuplicateElseInspection"/>
+
+        <!-- 0.5.34 — Reports unresolved PHP-symbol refs inside SkyTemplate
+             constructs (e.g. typos like `{=getKakaoLogginUrl()}` with a
+             doubled g). The platform doesn't emit "Cannot resolve" warnings
+             for arbitrary PsiReferences in HTML host files, so we emit our
+             own. WARNING severity (not ERROR) because PHP allows runtime-
+             registered functions / autoloaders / eval-defined globals, so a
+             name absent from the static index can still exist at runtime.
+             Registered for both HTML hosts (covers `*.html`) and SkyTemplate
+             language (covers `*.sky`). The 0.5.31 simple-name fallback in
+             SkyTemplatePhpReference reduces false positives further. -->
+        <localInspection
+            language="HTML"
+            shortName="SkyTemplateUndefinedSymbol"
+            displayName="SkyTemplate undefined PHP symbol"
+            groupName="SkyTemplate"
+            enabledByDefault="true"
+            level="WARNING"
+            implementationClass="com.novaframework.templatelang.inspection.SkyTemplateUndefinedSymbolInspection"/>
+        <localInspection
+            language="SkyTemplate"
+            shortName="SkyTemplateUndefinedSymbolSky"
+            displayName="SkyTemplate undefined PHP symbol"
+            groupName="SkyTemplate"
+            enabledByDefault="true"
+            level="WARNING"
+            implementationClass="com.novaframework.templatelang.inspection.SkyTemplateUndefinedSymbolInspection"/>
+
+        <!-- HTML / XML host coverage: same structural diagnostics, exposed
+             via an Annotator instead of LocalInspection so the daemon's
+             HTML / XML pipeline picks them up reliably. Annotators run
+             unconditionally (no profile gate), but the master `Enable
+             SkyTemplate support` toggle still silences them. -->
+        <annotator language="HTML"
+                   implementationClass="com.novaframework.templatelang.inspection.SkyTemplateStructuralAnnotator"/>
+        <annotator language="HTML"
+                   implementationClass="com.novaframework.templatelang.inspection.SkyTemplateScopeAnnotator"/>
+
+        <!-- M9 Live Templates: SkyTemplate snippets (loop, if, foreach, …).
+             Active in `*.sky` / `*.skyhtml` files (anywhere except inside a
+             `{*…*}` comment) and in HTML / XML host files (anywhere in the
+             document body, except inside <script>, <style>, or `{*…*}`). -->
+        <defaultLiveTemplates file="liveTemplates/SkyTemplate"/>
+        <liveTemplateContext
+            contextId="SkyTemplate"
+            implementation="com.novaframework.templatelang.sky.live.SkyTemplateContextType"/>
+
+        <!-- M9 File templates: New → SkyTemplate File menu — Empty (*.sky)
+             and Page (*.skyhtml) starters. The actual `*.ft` content lives
+             under `resources/fileTemplates/`. -->
+        <fileTemplateGroup
+            implementation="com.novaframework.templatelang.sky.SkyTemplateFileTemplates"/>
+
+        <!-- Typing-time completion for PHP symbols inside `{=`, `{?`, `{c.`,
+             `{var|`. Reference-based getVariants() can't fire until the user
+             has already typed a syntactically-complete construct, so we use
+             a CompletionContributor instead.
+
+             XML registration mirrors the reference-contributor surface — the
+             completion engine asks the leaf at the caret, and that leaf has
+             language=XML in HTML host files (see reference-contributor note).
+             Without XML, completion stops working for top-level template
+             constructs sitting directly under HtmlDocument. -->
+        <completion.contributor
+            language="HTML"
+            implementationClass="com.novaframework.templatelang.reference.SkyTemplateCompletionContributor"/>
+        <completion.contributor
+            language="XML"
+            implementationClass="com.novaframework.templatelang.reference.SkyTemplateCompletionContributor"/>
+        <completion.contributor
+            language="SkyTemplate"
+            implementationClass="com.novaframework.templatelang.reference.SkyTemplateCompletionContributor"/>
+    </extensions>
+</idea-plugin>

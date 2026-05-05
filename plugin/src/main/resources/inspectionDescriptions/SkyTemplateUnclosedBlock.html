@@ -1,0 +1,23 @@
+<html>
+<body>
+Reports SkyTemplate block tags that are opened but never closed.
+<p>Triggers on tags such as <code>{loop&nbsp;…}</code>, <code>{if&nbsp;…}</code>,
+<code>{foreach&nbsp;…}</code>, <code>{?expr}</code>, <code>{?:expr}</code>
+(elvis fallback), <code>{@…}</code>, <code>{%…}</code>, <code>{each&nbsp;…}</code>,
+<code>{for&nbsp;…}</code>, <code>{while&nbsp;…}</code> when no matching
+<code>{/}</code> or <code>{end}</code> closer is found before end-of-file.</p>
+<p>Example that triggers:</p>
+<pre><code>{loop xs as x}
+  &lt;li&gt;{x}&lt;/li&gt;
+&lt;!-- end of file, no {/} --&gt;</code></pre>
+<p>The error message also includes a <i>likely close near line N</i> hint
+based on indentation — the line one below the deepest body line of the
+opener — to help locate where the closer was probably intended.</p>
+<p>Runs in dedicated SkyTemplate files (<code>*.sky</code>) and in HTML
+host files where SkyTemplate constructs are embedded. Orphan close tags
+(<code>{/}</code> / <code>{end}</code> with no opener) are not reported
+— partial-template fragments where the opener lives in another included
+file are legitimate.</p>
+<!-- tooltip-end -->
+</body>
+</html>

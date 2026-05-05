@@ -1,0 +1,53 @@
+# ── macOS / Windows / Linux metadata ─────────────────────────────────────
+.DS_Store
+Thumbs.db
+desktop.ini
+*.swp
+*.swo
+
+# ── IDE / editor configuration ───────────────────────────────────────────
+# IntelliJ IDEA / PhpStorm — entire project config kept out (workspace,
+# task, dictionary, and SDK paths are per-developer). Re-stage individual
+# files (e.g. .idea/codeStyles/) explicitly if you want to share them.
+.idea/
+*.iml
+*.ipr
+*.iws
+out/
+
+# VS Code
+.vscode/
+
+# Other editors / tools
+.fleet/
+.metals/
+.bloop/
+
+# ── Gradle ───────────────────────────────────────────────────────────────
+# Daemon cache, file hashes, build histories — never useful in version
+# control. Gradle Wrapper itself (gradle/wrapper/, gradlew, gradlew.bat)
+# IS committed and not matched by these patterns.
+.gradle/
+build/
+
+# ── IntelliJ Platform plugin development ─────────────────────────────────
+# Local cache populated by the org.jetbrains.intellij.platform plugin —
+# bundled module XMLs, downloaded IDE distribution, sandbox state.
+.intellijPlatform/
+
+# ── Kotlin / JVM ─────────────────────────────────────────────────────────
+*.class
+hs_err_pid*
+replay_pid*
+
+# ── Logs / temp ──────────────────────────────────────────────────────────
+*.log
+logs/
+tmp/
+temp/
+_test/
+test/
+
+# ── Distribution artefacts (uncomment if you DO NOT want to ship the
+#    pre-built plugin zips alongside source):
+# plugin/build/distributions/*.zip

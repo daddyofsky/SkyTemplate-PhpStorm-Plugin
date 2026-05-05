@@ -1,0 +1,160 @@
+<templateSet group="SkyTemplate">
+
+  <template name="loop"
+            value="{loop $X$}&#10;&#9;$END$&#10;{/}"
+            description="SkyTemplate loop block"
+            toReformat="false"
+            toShortenFQNames="false">
+    <variable name="X" expression="" defaultValue="&quot;items&quot;" alwaysStopAt="true"/>
+    <context>
+      <option name="SkyTemplate" value="true"/>
+    </context>
+  </template>
+
+  <template name="if"
+            value="{if $COND$}&#10;&#9;$END$&#10;{/}"
+            description="SkyTemplate if block"
+            toReformat="false"
+            toShortenFQNames="false">
+    <variable name="COND" expression="" defaultValue="&quot;cond&quot;" alwaysStopAt="true"/>
+    <context>
+      <option name="SkyTemplate" value="true"/>
+    </context>
+  </template>
+
+  <template name="else"
+            value="{else}&#10;&#9;$END$"
+            description="SkyTemplate else clause"
+            toReformat="false"
+            toShortenFQNames="false">
+    <context>
+      <option name="SkyTemplate" value="true"/>
+    </context>
+  </template>
+
+  <template name="elif"
+            value="{elseif $COND$}&#10;&#9;$END$"
+            description="SkyTemplate elseif clause"
+            toReformat="false"
+            toShortenFQNames="false">
+    <variable name="COND" expression="" defaultValue="&quot;cond&quot;" alwaysStopAt="true"/>
+    <context>
+      <option name="SkyTemplate" value="true"/>
+    </context>
+  </template>
+
+  <template name="foreach"
+            value="{foreach $ARR$ as $K$ =&gt; $V$}&#10;&#9;$END$&#10;{/}"
+            description="SkyTemplate foreach block"
+            toReformat="false"
+            toShortenFQNames="false">
+    <variable name="ARR" expression="" defaultValue="&quot;items&quot;" alwaysStopAt="true"/>
+    <variable name="K" expression="" defaultValue="&quot;k&quot;" alwaysStopAt="true"/>
+    <variable name="V" expression="" defaultValue="&quot;v&quot;" alwaysStopAt="true"/>
+    <context>
+      <option name="SkyTemplate" value="true"/>
+    </context>
+  </template>
+
+  <template name="each"
+            value="{each $X$}&#10;&#9;$END$&#10;{/}"
+            description="SkyTemplate each block"
+            toReformat="false"
+            toShortenFQNames="false">
+    <variable name="X" expression="" defaultValue="&quot;items&quot;" alwaysStopAt="true"/>
+    <context>
+      <option name="SkyTemplate" value="true"/>
+    </context>
+  </template>
+
+  <template name="incl"
+            value="{include &quot;$PATH$&quot;}"
+            description="SkyTemplate include directive"
+            toReformat="false"
+            toShortenFQNames="false">
+    <variable name="PATH" expression="" defaultValue="&quot;common/header.html&quot;" alwaysStopAt="true"/>
+    <context>
+      <option name="SkyTemplate" value="true"/>
+    </context>
+  </template>
+
+  <template name="ifvar"
+            value="{?$VAR$}$END${/}"
+            description="SkyTemplate &quot;output if variable is truthy&quot; shortcut"
+            toReformat="false"
+            toShortenFQNames="false">
+    <variable name="VAR" expression="" defaultValue="&quot;cond&quot;" alwaysStopAt="true"/>
+    <context>
+      <option name="SkyTemplate" value="true"/>
+    </context>
+  </template>
+
+  <template name="var"
+            value="{$VAR$}"
+            description="SkyTemplate variable output"
+            toReformat="false"
+            toShortenFQNames="false">
+    <variable name="VAR" expression="" defaultValue="&quot;name&quot;" alwaysStopAt="true"/>
+    <context>
+      <option name="SkyTemplate" value="true"/>
+    </context>
+  </template>
+
+  <template name="cvar"
+            value="{c.$NAME$}"
+            description="SkyTemplate constant output (c.NAME)"
+            toReformat="false"
+            toShortenFQNames="false">
+    <variable name="NAME" expression="" defaultValue="&quot;NAME&quot;" alwaysStopAt="true"/>
+    <context>
+      <option name="SkyTemplate" value="true"/>
+    </context>
+  </template>
+
+  <template name="cmt"
+            value="{* $END$ *}"
+            description="SkyTemplate comment"
+            toReformat="false"
+            toShortenFQNames="false">
+    <context>
+      <option name="SkyTemplate" value="true"/>
+    </context>
+  </template>
+
+  <!-- Prefix-form abbreviations: type the literal start of a SkyTemplate
+       directive (`{*`, `{?`, `{@`) and press Tab to expand to the matching
+       block. Saves keystrokes vs typing the word abbreviation. -->
+
+  <template name="{*"
+            value="{* $END$ *}"
+            description="SkyTemplate comment (prefix form)"
+            toReformat="false"
+            toShortenFQNames="false">
+    <context>
+      <option name="SkyTemplate" value="true"/>
+    </context>
+  </template>
+
+  <template name="{?"
+            value="{?$COND$}&#10;&#9;$END$&#10;{/}"
+            description="SkyTemplate if block (prefix form)"
+            toReformat="false"
+            toShortenFQNames="false">
+    <variable name="COND" expression="" defaultValue="&quot;cond&quot;" alwaysStopAt="true"/>
+    <context>
+      <option name="SkyTemplate" value="true"/>
+    </context>
+  </template>
+
+  <template name="{@"
+            value="{@$X$}&#10;&#9;$END$&#10;{/}"
+            description="SkyTemplate loop block (prefix form)"
+            toReformat="false"
+            toShortenFQNames="false">
+    <variable name="X" expression="" defaultValue="&quot;items&quot;" alwaysStopAt="true"/>
+    <context>
+      <option name="SkyTemplate" value="true"/>
+    </context>
+  </template>
+
+</templateSet>

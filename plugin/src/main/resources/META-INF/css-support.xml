@@ -1,0 +1,25 @@
+<idea-plugin>
+    <extensions defaultExtensionNs="com.intellij">
+        <!-- `<style>` content is parsed by the CSS plugin into CSS PSI nodes
+             (embedded into the surrounding HTML/XML file). Without a
+             CSS-language registration here, our reference / completion
+             contributors never fire when the caret is on a SkyTemplate
+             identifier inside a `<style>` block — Ctrl+Click on `LABEL` in
+             `<style>p { content: '{c.LABEL}'; }` would return no PHP-symbol
+             reference even though the detector correctly identifies it. -->
+        <psi.referenceContributor
+            language="CSS"
+            implementation="com.novaframework.templatelang.reference.SkyTemplateReferenceContributor"/>
+        <completion.contributor
+            language="CSS"
+            implementationClass="com.novaframework.templatelang.reference.SkyTemplateCompletionContributor"/>
+
+        <!-- See JS counterpart in javascript-support.xml — same rationale,
+             keeps CSS rule-body brace pairing from snagging on `{=…}` /
+             `{?…}` template constructs embedded in `<style>` blocks. -->
+        <lang.braceMatcher
+            language="CSS"
+            implementationClass="com.novaframework.templatelang.sky.SkyTemplateAwareCssBraceMatcher"
+            order="first"/>
+    </extensions>
+</idea-plugin>

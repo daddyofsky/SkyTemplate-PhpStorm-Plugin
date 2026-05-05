@@ -1,0 +1,28 @@
+<html>
+<body>
+Reports a second <code>{else}</code> / <code>{:}</code> / <code>{:cond}</code>
+/ <code>{elseif&nbsp;…}</code> branch in the same <code>{if}</code> /
+<code>{loop}</code> / <code>{foreach}</code> / <code>{for}</code> /
+<code>{while}</code> block once a bare <code>{else}</code> /
+<code>{:}</code> has already terminated the chain.
+<p>The SkyTemplate compiler keeps emitting branches in source order and
+produces invalid PHP of the shape
+<code>} else { … } else { … }</code> — a syntax error that surfaces only
+at render time. Catching it statically avoids a runtime trap.</p>
+<p>Example that triggers:</p>
+<pre><code>{?cond}
+  primary content
+{:}
+  fallback content
+{else}                {* duplicate — compiler error at render *}
+  another fallback
+{/}</code></pre>
+<p>The same rule applies to a <code>{:}</code> empty-branch on a
+<code>{loop}</code> / <code>{foreach}</code> / <code>{for}</code> /
+<code>{while}</code> followed by another <code>{:}</code>.</p>
+<p>Runs in <code>*.sky</code> files (this inspection) and in HTML host
+files (via the companion annotator). Honours the master <i>Enable
+SkyTemplate support</i> toggle.</p>
+<!-- tooltip-end -->
+</body>
+</html>

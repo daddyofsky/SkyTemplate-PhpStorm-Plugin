@@ -1,0 +1,16 @@
+<html>
+<body>
+Reports SkyTemplate <code>{else}</code> / <code>{elseif&nbsp;…}</code> /
+<code>{:}</code> / <code>{:expr}</code> branch tags that appear outside
+any enclosing <code>{if}</code> / <code>{loop}</code> block.
+<p>The SkyTemplate compiler cannot place such a branch and would fail at
+compile time.</p>
+<p>Example that triggers:</p>
+<pre><code>{else}
+  fallback content
+{/}</code></pre>
+<p>Runs in dedicated SkyTemplate files (<code>*.sky</code>) and in HTML
+host files where SkyTemplate constructs are embedded.</p>
+<!-- tooltip-end -->
+</body>
+</html>

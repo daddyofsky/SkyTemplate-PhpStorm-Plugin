@@ -1,0 +1,41 @@
+<html>
+<body>
+Reports SkyTemplate constructs whose PHP-symbol reference cannot be
+resolved by PhpStorm's index — typos like a doubled letter in a function
+name, deleted helpers still referenced from a template, or class names
+the project never autoloads.
+<p>Covers the same surfaces as Find Usages / Go to Definition for
+SkyTemplate constructs:</p>
+<ul>
+  <li>Function calls in expression contexts: <code>{=foo()}</code>,
+      <code>{?foo()}</code>, <code>{if&nbsp;foo()}</code>,
+      <code>{var|foo}</code>, …</li>
+  <li>Static method calls: <code>{=Cls::method()}</code>,
+      <code>{var|Cls::method}</code></li>
+  <li>Class references: the <code>Cls</code> portion of the above</li>
+  <li>Global / namespaced constants: <code>{c.NAME}</code></li>
+  <li>Class constants: <code>{c.Cls::CONST}</code></li>
+</ul>
+<p>Plain variable references (<code>{var}</code>, <code>{var.field}</code>)
+carry no resolvable reference and are intentionally left untouched.</p>
+<p><b>Severity:</b> WARNING (not ERROR). PHP allows runtime-registered
+functions, autoloaders, <code>eval(...)</code>-defined globals, and
+framework magic methods, so a name absent from the static index can
+still exist at runtime. The inspection prefers warning over error to
+avoid false alarms in those scenarios.</p>
+<p><b>Namespace handling.</b> Resolution chain (matches Find Usages /
+Ctrl+Click): <code>useClass</code> alias expansion, then the configured
+project namespace prefix, then the global namespace, finally a simple-
+name fallback across all namespaces. A symbol that resolves under any
+of those is <em>not</em> reported. Configure the namespace and useClass
+list in <i>Settings → Tools → SkyTemplate</i>.</p>
+<p>Example that triggers:</p>
+<pre><code>{=getKakaoLogginUrl()}    {* doubled g — meant getKakaoLoginUrl *}
+{=Util::removed()}        {* method removed but template still uses it *}
+{c.MISSING_CONST}         {* constant deleted *}</code></pre>
+<p>Runs in <code>*.sky</code> files (this inspection) and in HTML host
+files (via the companion annotator). Honours the master <i>Enable
+SkyTemplate support</i> toggle.</p>
+<!-- tooltip-end -->
+</body>
+</html>
