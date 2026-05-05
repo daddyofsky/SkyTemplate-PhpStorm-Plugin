@@ -1,0 +1,43 @@
+<html>
+<body>
+Reports problems with named arguments in SkyTemplate calls. Three rules:
+<ul>
+  <li><b>Unknown parameter name</b> — the callee does not declare a
+      parameter by that name.
+      <pre><code>function helper(string $name) {}
+{=helper(typo: 1)}             {* `typo` is not a parameter *}</code></pre>
+      <i>Severity: WARNING.</i> A poly-variant resolution may have
+      candidates that accept the name; variadic functions
+      (<code>...$rest</code>) accept any name at runtime — both pass
+      silently. This rule is therefore deliberately lenient.</li>
+  <li><b>Duplicate named argument</b> — the same parameter name appears
+      twice in the same call.
+      <pre><code>{=helper(a: 1, a: 2)}          {* PHP 8 fatal at runtime *}</code></pre>
+      <i>Severity: ERROR.</i> PHP 8 raises
+      <code>Error: Named parameter $a overwrites previous argument</code>.</li>
+  <li><b>Positional argument after named</b> — a positional argument
+      appears once a named argument has been passed.
+      <pre><code>{=helper(name: 1, 2)}          {* PHP 8 fatal at runtime *}</code></pre>
+      <i>Severity: ERROR.</i> PHP 8 raises
+      <code>Error: Cannot use positional argument after named argument</code>.</li>
+</ul>
+<p><b>Pipe form.</b> SkyTemplate's pipe-filter syntax uses
+<code>=</code> instead of <code>:</code> for named args:
+<code>{var|fn=mode=daily, count=3}</code>. Comparison expressions
+(<code>{x|fn=count==2}</code>) are not treated as named args (the
+<code>==</code> guard).</p>
+<p><b>The <code>##</code> placeholder</b> in pipe filters is the
+pipe-input slot, not a user argument — it neither acts as a named
+marker for rule&nbsp;e nor counts toward duplicate detection.</p>
+<p><b>Call shapes covered:</b></p>
+<ul>
+  <li>Paren calls: <code>{=foo(name: 1)}</code></li>
+  <li>Static methods: <code>{=Cls::method(value: 1)}</code></li>
+  <li>Pipe filters: <code>{var|fn=mode=daily}</code></li>
+</ul>
+<p>Object method calls (<code>{=user.method(...)}</code>) require
+variable type inference and are out of scope.</p>
+<p>Honours the master <i>Enable SkyTemplate support</i> toggle.</p>
+<!-- tooltip-end -->
+</body>
+</html>

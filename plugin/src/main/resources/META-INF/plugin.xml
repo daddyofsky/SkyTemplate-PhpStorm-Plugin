@@ -5,12 +5,20 @@
 
     <description><![CDATA[
         PhpStorm support for the <b>SkyTemplate</b> PHP template engine.
+        Works in dedicated <code>*.sky</code> partials and in <code>*.html</code> host files
+        where SkyTemplate constructs are embedded.
         <ul>
-          <li>Syntax highlighting for SkyTemplate tags / variables / directives</li>
-          <li>Brace matching, block-comment toggle, attribute whitelist (<code>tpl-*</code>)</li>
-          <li>References to PHP functions, classes, methods, and constants used inside <code>{ … }</code></li>
-          <li>HTML / XML / JS error suppression where the source of the "error" is a SkyTemplate construct</li>
+          <li>Syntax highlighting for tags, variables, directives, comments, and operators</li>
+          <li>Brace matching, code folding for block tags, block-comment toggle, smart Enter (auto-indent &amp; auto-<code>{/}</code>)</li>
+          <li>Live templates and <i>New → SkyTemplate File</i> file templates</li>
+          <li>Find Usages / Go to Definition for PHP functions, static methods, classes, constants, and class constants referenced from <code>{ &hellip; }</code></li>
+          <li>Completion of PHP symbols inside <code>{=</code>, <code>{?</code>, <code>{c.</code>, <code>{var|</code></li>
+          <li>Inspections: unclosed block, orphan branch, loop-scope mismatch, redundant <code>@</code>, duplicate <code>{else}</code>, undefined PHP symbol</li>
+          <li>Marks PHP functions referenced only from templates as <i>used</i> so PhpStorm's "unused declaration" highlight stays correct</li>
+          <li>Suppresses HTML / XML / JS / CSS parser noise on ranges that are SkyTemplate constructs</li>
         </ul>
+        Project-level configuration in <i>Settings &rarr; Tools &rarr; SkyTemplate</i>:
+        root namespace, <code>useClass</code> aliases, template root, safe-mode and func-deny mirrors.
     ]]></description>
 
     <depends>com.intellij.modules.platform</depends>
@@ -142,6 +150,29 @@
             language="SkyTemplate"
             implementation="com.novaframework.templatelang.reference.SkyTemplateReferenceContributor"/>
 
+        <!-- Cmd+click navigation override. The host language's PSI may attach
+             its own self-reference at the same offset as our PhpReference; in
+             a PsiMultiReference race with equal ranges, that self-ref wins by
+             stable-sort insertion order and steers navigation to the wrong
+             target (notably JS's qualified-chain reference for `foo() . bar()`
+             resolving to `foo` instead of `bar`). The handler runs BEFORE
+             reference-based resolution, so when it returns a non-null target
+             from our PHP-symbol resolution, the platform skips the
+             multi-reference race entirely. Returns null outside template
+             tag ranges, so regular HTML/JS/CSS navigation is unaffected. -->
+        <gotoDeclarationHandler
+            order="first"
+            implementation="com.novaframework.templatelang.reference.SkyTemplateGotoDeclarationHandler"/>
+
+        <!-- Fix the "highlight identifier under caret" visual indicator. The
+             default IdentifierHighlighterPass uses findReferenceAt -> resolve,
+             which loses to JS's chain self-reference inside `<script>` blocks
+             via PsiMultiReference's stable-sort comparator. This factory takes
+             over for offsets inside template tag ranges and highlights every
+             local occurrence of the same PHP identifier in the file. -->
+        <highlightUsagesHandlerFactory
+            implementation="com.novaframework.templatelang.reference.SkyTemplateHighlightUsagesHandlerFactory"/>
+
         <!-- 0.5.30 — tell PhpStorm's "Unused declaration" daemon that a PHP
              symbol is implicitly used when its name appears in any project
              `.sky` / `.html` file. The daemon's ReferencesSearch fall-through
@@ -193,7 +224,7 @@
         <localInspection
             language="SkyTemplate"
             shortName="SkyTemplateUnclosedBlock"
-            displayName="Unclosed SkyTemplate block"
+            displayName="Unclosed block"
             groupName="SkyTemplate"
             enabledByDefault="true"
             level="ERROR"
@@ -201,21 +232,21 @@
         <localInspection
             language="SkyTemplate"
             shortName="SkyTemplateOrphanElse"
-            displayName="Orphan SkyTemplate {else} / branch"
+            displayName="Orphan {else} / branch"
             groupName="SkyTemplate"
             enabledByDefault="true"
             level="ERROR"
             implementationClass="com.novaframework.templatelang.inspection.SkyTemplateOrphanElseInspection"/>
 
-        <!-- M7+ scope / variable inspections (0.5.25). All three share
+        <!-- Scope / variable inspections. Three of them share
              SkyTemplateScopeAnalyzer for the file walk and stack tracking
              — each inspection just filters to its own diagnostic codes.
-             Activates in `*.sky` / `*.skyhtml`; HTML / XML host coverage
-             goes via SkyTemplateScopeAnnotator. -->
+             Activates in `*.sky`; HTML host coverage goes via
+             SkyTemplateScopeAnnotator. -->
         <localInspection
             language="SkyTemplate"
             shortName="SkyTemplateLoopScopeMismatch"
-            displayName="SkyTemplate loop-scope depth mismatch"
+            displayName="Loop-scope depth mismatch"
             groupName="SkyTemplate"
             enabledByDefault="true"
             level="WARNING"
@@ -223,7 +254,7 @@
         <localInspection
             language="SkyTemplate"
             shortName="SkyTemplateRedundantAt"
-            displayName="SkyTemplate redundant `@` modifier"
+            displayName="Redundant `@` modifier"
             groupName="SkyTemplate"
             enabledByDefault="true"
             level="WARNING"
@@ -231,38 +262,64 @@
         <localInspection
             language="SkyTemplate"
             shortName="SkyTemplateDuplicateElse"
-            displayName="SkyTemplate duplicate {else} branch"
+            displayName="Duplicate {else} branch"
             groupName="SkyTemplate"
             enabledByDefault="true"
             level="WARNING"
             implementationClass="com.novaframework.templatelang.inspection.SkyTemplateDuplicateElseInspection"/>
 
-        <!-- 0.5.34 — Reports unresolved PHP-symbol refs inside SkyTemplate
-             constructs (e.g. typos like `{=getKakaoLogginUrl()}` with a
+        <!-- Reports SkyTemplate constructs whose PHP-symbol reference fails
+             to resolve (e.g. typos like `{=getKakaoLogginUrl()}` with a
              doubled g). The platform doesn't emit "Cannot resolve" warnings
              for arbitrary PsiReferences in HTML host files, so we emit our
              own. WARNING severity (not ERROR) because PHP allows runtime-
-             registered functions / autoloaders / eval-defined globals, so a
-             name absent from the static index can still exist at runtime.
-             Registered for both HTML hosts (covers `*.html`) and SkyTemplate
-             language (covers `*.sky`). The 0.5.31 simple-name fallback in
-             SkyTemplatePhpReference reduces false positives further. -->
-        <localInspection
-            language="HTML"
-            shortName="SkyTemplateUndefinedSymbol"
-            displayName="SkyTemplate undefined PHP symbol"
-            groupName="SkyTemplate"
-            enabledByDefault="true"
-            level="WARNING"
-            implementationClass="com.novaframework.templatelang.inspection.SkyTemplateUndefinedSymbolInspection"/>
+             registered functions / autoloaders / eval-defined globals, so
+             a name absent from the static index can still exist at runtime.
+
+             Registered ONLY for SkyTemplate language (single profile entry);
+             HTML host coverage runs through SkyTemplateUndefinedSymbolAnnotator
+             below — same M7 pattern as the structural / scope inspections. -->
         <localInspection
             language="SkyTemplate"
-            shortName="SkyTemplateUndefinedSymbolSky"
-            displayName="SkyTemplate undefined PHP symbol"
+            shortName="SkyTemplateUndefinedSymbol"
+            displayName="Undefined PHP symbol"
             groupName="SkyTemplate"
             enabledByDefault="true"
             level="WARNING"
             implementationClass="com.novaframework.templatelang.inspection.SkyTemplateUndefinedSymbolInspection"/>
+
+        <!-- Phase 3: argument-count rules. Reports paren / static-method /
+             pipe-form calls whose argument count does not match the resolved
+             PHP function or method signature. Variadic callees and default-
+             value parameters are accounted for. Type checks are intentionally
+             out of scope. Rule a (required missing) and rule b (too many)
+             both default to WARNING — a runtime-registered function or
+             non-indexed autoloader could still satisfy the call at execution
+             time, mirroring SkyTemplateUndefinedSymbol's tone. -->
+        <localInspection
+            language="SkyTemplate"
+            shortName="SkyTemplateArgumentCount"
+            displayName="Argument count mismatch"
+            groupName="SkyTemplate"
+            enabledByDefault="true"
+            level="WARNING"
+            implementationClass="com.novaframework.templatelang.inspection.SkyTemplateArgumentCountInspection"/>
+
+        <!-- Phase 3: named-argument rules. Rule c (unknown name) is WARNING
+             because variadic and poly-variant resolutions can legitimately
+             accept names absent from the static stub. Rule d (duplicate
+             named) and rule e (positional after named) are pinned to ERROR
+             by the visitor since both are PHP-8 runtime fatals. The default
+             profile level stays WARNING so users can soften via
+             Settings → Editor → Inspections → SkyTemplate. -->
+        <localInspection
+            language="SkyTemplate"
+            shortName="SkyTemplateNamedArgument"
+            displayName="Named-argument issue"
+            groupName="SkyTemplate"
+            enabledByDefault="true"
+            level="WARNING"
+            implementationClass="com.novaframework.templatelang.inspection.SkyTemplateNamedArgumentInspection"/>
 
         <!-- HTML / XML host coverage: same structural diagnostics, exposed
              via an Annotator instead of LocalInspection so the daemon's
@@ -273,6 +330,15 @@
                    implementationClass="com.novaframework.templatelang.inspection.SkyTemplateStructuralAnnotator"/>
         <annotator language="HTML"
                    implementationClass="com.novaframework.templatelang.inspection.SkyTemplateScopeAnnotator"/>
+        <annotator language="HTML"
+                   implementationClass="com.novaframework.templatelang.inspection.SkyTemplateUndefinedSymbolAnnotator"/>
+
+        <!-- Phase 3 host coverage: HTML host files surface argument-validation
+             diagnostics through an annotator (not the inspections), mirroring
+             SkyTemplateUndefinedSymbolAnnotator. Severity mapping matches the
+             inspection wrappers: rules a/b/c → WARNING, rules d/e → ERROR. -->
+        <annotator language="HTML"
+                   implementationClass="com.novaframework.templatelang.inspection.SkyTemplateArgumentAnnotator"/>
 
         <!-- M9 Live Templates: SkyTemplate snippets (loop, if, foreach, …).
              Active in `*.sky` / `*.skyhtml` files (anywhere except inside a
@@ -308,5 +374,34 @@
         <completion.contributor
             language="SkyTemplate"
             implementationClass="com.novaframework.templatelang.reference.SkyTemplateCompletionContributor"/>
+
+        <!-- ParameterInfo (Ctrl+P) for paren calls and pipe `=` filter args.
+             Three language registrations mirror the reference-contributor
+             surface so the popup activates whether the caller is inside an
+             HTML host (.html), an XML leaf token (HTML's leaf language), or
+             a SkyTemplate file (.sky). The handler returns null outside
+             SkyTemplate constructs so non-template code is unaffected. -->
+        <codeInsight.parameterInfo
+            language="HTML"
+            implementationClass="com.novaframework.templatelang.reference.SkyTemplateParameterInfoHandler"/>
+        <codeInsight.parameterInfo
+            language="XML"
+            implementationClass="com.novaframework.templatelang.reference.SkyTemplateParameterInfoHandler"/>
+        <codeInsight.parameterInfo
+            language="SkyTemplate"
+            implementationClass="com.novaframework.templatelang.reference.SkyTemplateParameterInfoHandler"/>
+
+        <!-- Inlay parameter-name hints — `name:` chips before each
+             positional argument. Already-named args are skipped. Same
+             three-language surface as parameter info. -->
+        <codeInsight.parameterNameHints
+            language="HTML"
+            implementationClass="com.novaframework.templatelang.reference.SkyTemplateInlayParameterHintsProvider"/>
+        <codeInsight.parameterNameHints
+            language="XML"
+            implementationClass="com.novaframework.templatelang.reference.SkyTemplateInlayParameterHintsProvider"/>
+        <codeInsight.parameterNameHints
+            language="SkyTemplate"
+            implementationClass="com.novaframework.templatelang.reference.SkyTemplateInlayParameterHintsProvider"/>
     </extensions>
 </idea-plugin>

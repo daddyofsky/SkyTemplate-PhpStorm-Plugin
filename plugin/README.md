@@ -5,10 +5,13 @@ The same code path also handles **Template_** (xtac.net) — both engines share
 the directive surface this plugin cares about, so existing Template_ projects
 work without extra configuration.
 
-Status: **early scaffold** — Milestones M1, M2 (HTML annotator + integration),
-M4 (PHP-symbol references + completion) are largely done.
+Status: **stable** — released as 1.1.0. Editor support, PHP references &
+completion, structural & argument-validation inspections, named-args
+(paren + pipe), parameter-info popup, and inlay parameter hints are in
+place.
 
-See [../PLAN.md](../PLAN.md) for the full roadmap.
+See [CHANGELOG.md](CHANGELOG.md) for the per-release notes and
+[../PLAN.md](../PLAN.md) for the full roadmap.
 
 ## Build
 

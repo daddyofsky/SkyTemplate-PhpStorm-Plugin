@@ -1,0 +1,46 @@
+<html>
+<body>
+Reports SkyTemplate call sites whose argument count does not match the
+resolved PHP function / method signature.
+<ul>
+  <li><b>Required parameter missing</b> — the callee declares a parameter
+      with no default value, but the call passes nothing (or only later
+      named args) to fill it.
+      <pre><code>function helper(string $a) {}
+{=helper()}                    {* missing $a *}</code></pre>
+  </li>
+  <li><b>Too many arguments</b> — the call passes more positional values
+      than the callee declares, and the callee is not variadic.
+      <pre><code>function f($a, $b) {}
+{=f(1, 2, 3)}                  {* third argument has no parameter *}</code></pre>
+  </li>
+</ul>
+<p><b>Variadic callees</b> (<code>function many(...$xs) {}</code>) are
+exempt from the &ldquo;too many&rdquo; check — any positional count is
+accepted.</p>
+<p><b>Default-value parameters</b> are exempt from the &ldquo;required
+missing&rdquo; check.</p>
+<p><b>Severity:</b> WARNING. PHP allows runtime-registered functions,
+custom autoloaders, and framework magic, so a static signature mismatch
+isn't always a defect. The inspection prefers warning over error to
+avoid false alarms.</p>
+<p><b>Multiple resolutions.</b> When a name resolves to several PHP
+candidates (e.g. via <code>useClass</code> aliasing or simple-name
+fallback across namespaces), the inspection picks the most permissive
+signature: the candidate with the lowest required count for
+&ldquo;missing&rdquo; checks, and any candidate with sufficient
+parameters / variadic for the &ldquo;too many&rdquo; check.</p>
+<p><b>Call shapes covered:</b></p>
+<ul>
+  <li>Paren calls: <code>{=foo(a, b)}</code>, <code>{?foo(a)}</code>,
+      <code>{if&nbsp;foo(a)}</code></li>
+  <li>Static methods: <code>{=Cls::method(a, b)}</code></li>
+  <li>Pipe filters: <code>{var|func=a, b}</code>,
+      <code>{var|sprintf='%05d', ##}</code></li>
+</ul>
+<p>Object method calls (<code>{=user.method(...)}</code>) require
+variable type inference and are out of scope.</p>
+<p>Honours the master <i>Enable SkyTemplate support</i> toggle.</p>
+<!-- tooltip-end -->
+</body>
+</html>
