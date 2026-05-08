@@ -91,6 +91,25 @@
         <enterHandlerDelegate
             implementation="com.novaframework.templatelang.sky.SkyTemplateEnterHandler"/>
 
+        <!-- Typed handler: when the user finishes typing a closer (`{/}`,
+             `{end}`) or branch (`{:}`, `{:expr}`, `{else}`, `{elseif x}`)
+             that occupies its line on its own, the line's leading
+             whitespace is rewritten to align with the matching opener.
+             Mirrors the HTML editor's `</tag>` smart un-indent. -->
+        <typedHandler
+            implementation="com.novaframework.templatelang.sky.SkyTemplateClosingTagAligner"/>
+
+        <!-- Post-format processor: SkyTemplate has no `lang.formatter` of
+             its own, so the host (HTML / XML) formatter drives Reformat
+             Code and strips block-body indent it doesn't recognise. This
+             processor runs after the host formatter and re-indents body
+             lines inside `{loop …} … {/}` (and other block forms) up to
+             the level required by their nearest enclosing opener — only
+             ever increasing indent, never reducing, so deeper HTML
+             indents survive untouched. -->
+        <postFormatProcessor
+            implementation="com.novaframework.templatelang.sky.SkyTemplatePostFormatProcessor"/>
+
         <!-- For *.sky / *.skyhtml files (where SkyTemplate is the file type):
              multi-tree provider keeps HTML / JS / CSS PSI alongside SkyTemplate. -->
         <fileType.fileViewProviderFactory

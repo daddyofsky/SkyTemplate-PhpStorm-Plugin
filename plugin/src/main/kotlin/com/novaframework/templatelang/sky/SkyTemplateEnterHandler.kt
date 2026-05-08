@@ -73,23 +73,63 @@ class SkyTemplateEnterHandler : EnterHandlerDelegateAdapter() {
         val offset = caretOffset.get() ?: return EnterHandlerDelegate.Result.Continue
         if (offset <= 0 || offset > text.length) return EnterHandlerDelegate.Result.Continue
 
-        val analysis = SkyTemplateEnterHandlerLogic.analyzeBefore(text, offset)
-            ?: return EnterHandlerDelegate.Result.Continue
-
         // Resolve indent step from the project's code style. Falls back to
         // 4 spaces if the SkyTemplate language has no explicit indent options
         // (which it doesn't until we add a Code Style page in M9).
         val indentStep = resolveIndentStep(file)
 
+        // Smart-split path — runs BEFORE the after-opener path so that
+        // `{?cond}<caret>{/}` (and any "caret immediately before a
+        // closer / branch" position) opens up to a three-line PHP / JS
+        // `{<enter>}` shape: indented blank line for the caret, with
+        // the closer / branch on its own line at the matching opener's
+        // depth.
+        val split = SkyTemplateEnterHandlerLogic.checkSmartSplit(text, offset, indentStep)
+        if (split != null) {
+            applySmartSplit(file, editor, document, offset, split)
+            return EnterHandlerDelegate.Result.Stop
+        }
+
+        val analysis = SkyTemplateEnterHandlerLogic.analyzeBefore(text, offset)
+            ?: return EnterHandlerDelegate.Result.Continue
+
+        // HTML-aware lift: when the opener sits as the first child of an
+        // HTML element (line above ends with `<div>` / `<ul>` / etc. and the
+        // opener is the first non-whitespace on its line), the user expects
+        // the body / closer to align with HTML descendants. We compute the
+        // expected indent and use it for the inserted lines AND adjust the
+        // opener line itself so Enter's result matches what
+        // [SkyTemplatePostFormatProcessor] would settle Reformat Code on.
+        val htmlExpected = SkyTemplateIndentContext
+            .expectedHtmlChildIndent(text, analysis.openerOffset, indentStep)
+        val effectiveIndent = if (htmlExpected != null && htmlExpected.length > analysis.indent.length) {
+            htmlExpected
+        } else {
+            analysis.indent
+        }
+        val liftDelta = effectiveIndent.length - analysis.indent.length
+        val openerLineStart = analysis.openerOffset - analysis.indent.length
+
+        // If we are lifting, rewrite the opener's leading-whitespace prefix
+        // BEFORE inserting the rest. Doing the lift first keeps the
+        // post-insert offset arithmetic straightforward (caret math below
+        // is computed on the post-lift `offset`).
+        val adjustedOffset = if (liftDelta > 0) {
+            document.replaceString(openerLineStart, openerLineStart + analysis.indent.length, effectiveIndent)
+            offset + liftDelta
+        } else {
+            offset
+        }
+
         val insertion = buildString {
             append('\n')
-            append(analysis.indent)
+            append(effectiveIndent)
             append(indentStep)
             if (analysis.needsAutoClose) {
                 // Caret will be placed at the end of this prefix; the closer
                 // line follows on the next document line.
                 append('\n')
-                append(analysis.indent)
+                append(effectiveIndent)
                 append("{/}")
             }
         }
@@ -97,9 +137,9 @@ class SkyTemplateEnterHandler : EnterHandlerDelegateAdapter() {
         // Compute caret position BEFORE the insertion so we can place it at
         // the end of the indented blank line (just after the indent step,
         // before the closer if there is one).
-        val caretAfter = offset + 1 /* '\n' */ + analysis.indent.length + indentStep.length
+        val caretAfter = adjustedOffset + 1 /* '\n' */ + effectiveIndent.length + indentStep.length
 
-        document.insertString(offset, insertion)
+        document.insertString(adjustedOffset, insertion)
         PsiDocumentManager.getInstance(file.project).commitDocument(document)
         editor.caretModel.moveToOffset(caretAfter)
 
@@ -107,6 +147,211 @@ class SkyTemplateEnterHandler : EnterHandlerDelegateAdapter() {
         // Continue would let the platform also insert its own newline and
         // re-indent, which would conflict with what we just wrote.
         return EnterHandlerDelegate.Result.Stop
+    }
+
+    /**
+     * Post-Enter Sky-aware re-indent. Runs AFTER the platform's own
+     * Enter handling and fixes two cases the host (HTML / XML) Enter
+     * doesn't get right:
+     *
+     *   1. **Enter inside a Sky block uses HTML-only indent.** The
+     *      host handler doesn't see `{?cond}` / `{@items}` as a block
+     *      opener, so the new line lands at the host's HTML-derived
+     *      depth instead of the SkyTemplate body depth. We replay the
+     *      unified HTML+Sky stack walk for the caret line and lift it
+     *      to the proper depth (one-sided — a deeper user / host
+     *      indent is preserved).
+     *   2. **Enter before a `{/}` / `{:}` line indents the closer.**
+     *      The closer / branch line gets the host's auto-indent
+     *      regardless of the matching opener. Re-indenting the line
+     *      below with the same Sky-aware walk pulls the closer back
+     *      to its opener's level (two-sided — closer / branch indent
+     *      is fully determined by the matching opener).
+     *
+     * Both fixes leverage [SkyTemplatePostFormatLogic.computeIndentForLine]
+     * and [SkyTemplatePostFormatLogic.reindent] so the rules stay
+     * consistent with Reformat Code — the user's own suggested
+     * direction ("엔터 클릭시 해당 라인을 reformat code 로직을 태우는").
+     */
+    override fun postProcessEnter(
+        file: PsiFile,
+        editor: Editor,
+        dataContext: DataContext,
+    ): EnterHandlerDelegate.Result {
+        val lang = file.language
+        if (lang !== SkyTemplateLanguage &&
+            lang !== com.intellij.lang.html.HTMLLanguage.INSTANCE &&
+            lang !== com.intellij.lang.xml.XMLLanguage.INSTANCE
+        ) return EnterHandlerDelegate.Result.Continue
+
+        val document = editor.document
+        val caretOffset = editor.caretModel.offset
+        if (caretOffset < 0 || caretOffset > document.textLength) {
+            return EnterHandlerDelegate.Result.Continue
+        }
+
+        val indentStep = resolveIndentStep(file)
+
+        // (1) Caret line — fix indent on the freshly-inserted side of
+        // the Enter break. We compute the expected indent and apply if
+        // the platform's auto-indent landed shallower (one-sided), or
+        // if the line's first content is a closer / branch (two-sided).
+        applyCaretLineIndent(editor, document, caretOffset, indentStep)
+
+        // (2) Line below — covers the "Enter before `{/}` / `{:}`"
+        // case where the platform may have left the closer / branch at
+        // the same indent as the inserted blank line. The reindent pass
+        // is range-scoped so only the affected line is touched.
+        val newCaretOffset = editor.caretModel.offset
+        val belowStart = lineEndOf(document.charsSequence, newCaretOffset)
+            .let { if (it < document.textLength) it + 1 else -1 }
+        if (belowStart >= 0) {
+            val updatedText = document.charsSequence
+            var belowEnd = belowStart
+            while (belowEnd < updatedText.length && updatedText[belowEnd] != '\n') belowEnd++
+            SkyTemplatePostFormatLogic.reindent(
+                text = updatedText,
+                range = com.intellij.openapi.util.TextRange(belowStart, belowEnd),
+                indentStep = indentStep,
+            ) { from, to, replacement ->
+                document.replaceString(from, to, replacement)
+            }
+        }
+
+        PsiDocumentManager.getInstance(file.project).commitDocument(document)
+        return EnterHandlerDelegate.Result.Continue
+    }
+
+    /**
+     * Replace the caret line's leading whitespace with the
+     * Sky-aware desired indent (computed by
+     * [SkyTemplatePostFormatLogic.computeIndentForLine]). Caret is
+     * adjusted so that:
+     *   - if it was inside the leading whitespace, it lands at the end
+     *     of the new indent (typical Enter outcome — caret on a freshly
+     *     inserted blank line),
+     *   - if it was past the whitespace (mid-line content), it shifts
+     *     by the indent-length delta.
+     */
+    private fun applyCaretLineIndent(
+        editor: Editor,
+        document: com.intellij.openapi.editor.Document,
+        caretOffset: Int,
+        indentStep: String,
+    ) {
+        val text = document.charsSequence
+        var lineStart = caretOffset
+        while (lineStart > 0 && text[lineStart - 1] != '\n') lineStart--
+        var lineEnd = caretOffset
+        while (lineEnd < text.length && text[lineEnd] != '\n') lineEnd++
+
+        val desired = SkyTemplatePostFormatLogic
+            .computeIndentForLine(text, lineStart, indentStep)
+            ?: return
+
+        var firstNonWs = lineStart
+        while (firstNonWs < lineEnd && (text[firstNonWs] == ' ' || text[firstNonWs] == '\t')) firstNonWs++
+        val current = text.subSequence(lineStart, firstNonWs).toString()
+        if (current == desired) return
+
+        // Apply rule:
+        //   - blank line (firstNonWs == lineEnd) → set indent to desired
+        //     (caret will sit at end of new indent).
+        //   - line starts with a Sky / HTML closer or branch → two-sided
+        //     (set indent to desired so the closer aligns with opener).
+        //   - other content → one-sided (lift only when shallower).
+        val isBlank = firstNonWs == lineEnd
+        val firstIsCloserOrBranch = !isBlank && isCloserOrBranchLineStart(text, firstNonWs, lineEnd)
+        val shouldEdit = when {
+            isBlank -> current != desired
+            firstIsCloserOrBranch -> current != desired
+            else -> visualWidth(current) < visualWidth(desired)
+        }
+        if (!shouldEdit) return
+
+        document.replaceString(lineStart, firstNonWs, desired)
+
+        val delta = desired.length - current.length
+        val newCaret = when {
+            caretOffset <= lineStart -> caretOffset
+            caretOffset <= firstNonWs -> lineStart + desired.length
+            else -> caretOffset + delta
+        }
+        editor.caretModel.moveToOffset(newCaret)
+    }
+
+    /**
+     * Apply a smart-split edit at [offset]. Builds the insertion based on
+     * what's BEFORE the caret on its line — see
+     * [SkyTemplateEnterHandlerLogic.SmartSplitInfo] for the rule details.
+     *
+     * Insertion shapes:
+     *   - **Pre-caret is content** (Case B): `\n + bodyIndent + \n +
+     *     closerIndent`. Caret moves to end of `bodyIndent` on the new
+     *     blank indented line.
+     *   - **Pre-caret is whitespace, shallower than bodyIndent** (Case
+     *     A with lift): missing `bodyIndent` chars + `\n + closerIndent`.
+     *     The pre-caret whitespace already on the line + the missing
+     *     chars together form `bodyIndent`. Caret moves to end of new
+     *     indent on the same line.
+     *   - **Pre-caret is whitespace, ≥ bodyIndent** (Case A no lift):
+     *     `\n + closerIndent`. The pre-caret whitespace IS the body
+     *     indent (or deeper, user's choice). Caret stays where it was
+     *     (end of pre-caret whitespace), now end-of-line just before
+     *     the inserted newline.
+     */
+    private fun applySmartSplit(
+        file: PsiFile,
+        editor: Editor,
+        document: com.intellij.openapi.editor.Document,
+        offset: Int,
+        split: SkyTemplateEnterHandlerLogic.SmartSplitInfo,
+    ) {
+        val (insertion, caretShift) = if (split.preCaretIsAllWs) {
+            if (split.preCaretLength < split.bodyIndent.length) {
+                val missing = split.bodyIndent.substring(split.preCaretLength)
+                Pair(missing + "\n" + split.closerIndent, missing.length)
+            } else {
+                Pair("\n" + split.closerIndent, 0)
+            }
+        } else {
+            Pair(
+                "\n" + split.bodyIndent + "\n" + split.closerIndent,
+                1 + split.bodyIndent.length,
+            )
+        }
+
+        document.insertString(offset, insertion)
+        PsiDocumentManager.getInstance(file.project).commitDocument(document)
+        editor.caretModel.moveToOffset(offset + caretShift)
+    }
+
+    /**
+     * Cheap check: starting at [firstNonWs], does the rest of the line
+     * begin with a SkyTemplate closer / branch (`{/`, `{end`, `{:`,
+     * `{else`, `{elseif`) or HTML closer (`</`)? Used to decide whether
+     * to apply two-sided indenting on the caret line.
+     */
+    private fun isCloserOrBranchLineStart(text: CharSequence, firstNonWs: Int, lineEnd: Int): Boolean {
+        if (firstNonWs >= lineEnd) return false
+        val c = text[firstNonWs]
+        if (c == '{' && firstNonWs + 1 < lineEnd) {
+            val n = text[firstNonWs + 1]
+            if (n == '/' || n == ':') return true
+            // Keyword forms — match `{end…}`, `{else…}`, `{elseif…}` ignoring case.
+            val rest = text.subSequence(firstNonWs + 1, lineEnd.coerceAtMost(firstNonWs + 12)).toString().lowercase()
+            if (rest.startsWith("end") || rest.startsWith("else")) return true
+        }
+        if (c == '<' && firstNonWs + 1 < lineEnd && text[firstNonWs + 1] == '/') return true
+        return false
+    }
+
+    private fun visualWidth(s: String): Int = s.length
+
+    private fun lineEndOf(text: CharSequence, offset: Int): Int {
+        var i = offset
+        while (i < text.length && text[i] != '\n') i++
+        return i
     }
 
     /**
@@ -145,7 +390,206 @@ object SkyTemplateEnterHandlerLogic {
         val indent: String,
         /** True if the handler should auto-insert a `{/}` line below. */
         val needsAutoClose: Boolean,
+        /** Document offset of the just-typed opener's `{`. */
+        val openerOffset: Int,
     )
+
+    /**
+     * Smart-split decision for the case where [caretOffset] sits IMMEDIATELY
+     * before a SkyTemplate closer (`{/}`, `{end}`) or branch (`{:}`,
+     * `{:expr}`, `{else}`, `{elseif x}`). Mirrors the PHP / JS editor's
+     * `{<enter>}` behaviour: an indented blank line is inserted and the
+     * closer / branch moves to the next line at the matching opener's
+     * depth.
+     *
+     * The struct describes WHAT to insert; the handler performs the edit
+     * and the caret repositioning.
+     *
+     * @property bodyIndent       indent string for the inserted blank line
+     *   (where the caret will end up). Equals matching-opener indent +
+     *   one indent step.
+     * @property closerIndent     indent string for the closer / branch
+     *   line. Equals matching-opener indent.
+     * @property preCaretIsAllWs  true when everything before the caret on
+     *   the current line is whitespace (or empty). Drives whether we
+     *   insert just `\n + closerIndent` (the caret line's existing
+     *   whitespace already serves as body indent) or
+     *   `\n + bodyIndent + \n + closerIndent` (the caret line has body
+     *   content, so we add a fresh blank indented line in between).
+     * @property preCaretLength   length of the pre-caret whitespace —
+     *   used to decide whether to lift it up to [bodyIndent] (only
+     *   relevant when [preCaretIsAllWs]).
+     */
+    data class SmartSplitInfo(
+        val bodyIndent: String,
+        val closerIndent: String,
+        val preCaretIsAllWs: Boolean,
+        val preCaretLength: Int,
+    )
+
+    /**
+     * Returns smart-split info when [caretOffset] sits immediately before
+     * a closer / branch tag whose rest-of-line is only whitespace, and a
+     * matching opener exists. Otherwise null — the caller falls through
+     * to [analyzeBefore] (the after-opener path) and ultimately to the
+     * platform's Enter.
+     */
+    fun checkSmartSplit(text: CharSequence, caretOffset: Int, indentStep: String): SmartSplitInfo? {
+        if (caretOffset < 0 || caretOffset >= text.length) return null
+        if (text[caretOffset] != '{') return null
+
+        // Locate the matching `}` for the `{` at the caret on the same line.
+        val closeOffset = findClosingBraceOnLine(text, caretOffset) ?: return null
+
+        // The tag must be a closer or branch.
+        val kind = classifyTagKind(text, caretOffset, closeOffset + 1)
+        if (kind != TagKind.CLOSE && kind != TagKind.BRANCH) return null
+
+        // Everything after the closing `}` on the line must be whitespace.
+        // A trailing comment or content disqualifies the smart split — the
+        // user's hand-typed structure shouldn't be rearranged in that case.
+        var i = closeOffset + 1
+        while (i < text.length && (text[i] == ' ' || text[i] == '\t')) i++
+        if (i < text.length && text[i] != '\n') return null
+
+        // Locate the matching opener (LIFO + indent-aware unwinding —
+        // same rule the closing-tag aligner and the unclosed-block
+        // inspection use). No matching opener → leave Enter alone.
+        val openerOffset = findMatchingOpenerForSplit(text, caretOffset) ?: return null
+        val openerIndent = lineIndentStringAtOffset(text, openerOffset)
+
+        // Inspect what sits BEFORE the caret on the current line.
+        val lineStart = lineStartOfOffset(text, caretOffset)
+        val preCaretText = text.subSequence(lineStart, caretOffset).toString()
+        val preCaretIsAllWs = preCaretText.all { it == ' ' || it == '\t' }
+
+        return SmartSplitInfo(
+            bodyIndent = openerIndent + indentStep,
+            closerIndent = openerIndent,
+            preCaretIsAllWs = preCaretIsAllWs,
+            preCaretLength = preCaretText.length,
+        )
+    }
+
+    /** Internal tag kind for [findMatchingOpenerForSplit] / [classifyTagKind]. */
+    private enum class TagKind { OPEN, CLOSE, BRANCH, OTHER }
+
+    /**
+     * Same classifier the post-format / typed-handler aligner uses. Kept
+     * private to this object; the duplicated copies across the handler
+     * code lets each handler stay independently auditable while sharing
+     * the same recognition rules.
+     */
+    private fun classifyTagKind(text: CharSequence, openOffset: Int, closeEndOffset: Int): TagKind {
+        val bodyStart = openOffset + 1
+        val bodyEnd = closeEndOffset - 1
+        if (bodyEnd <= bodyStart) return TagKind.OTHER
+        var i = bodyStart
+        while (i < bodyEnd && (text[i] == ' ' || text[i] == '\t')) i++
+        if (i >= bodyEnd) return TagKind.OTHER
+        val first = text[i]
+        val hasLeadingWs = i > bodyStart
+        if (first == '/') return TagKind.CLOSE
+        if (first == ':') return TagKind.BRANCH
+        if (first == '?' && i + 1 < bodyEnd && text[i + 1] == ':') return TagKind.OTHER
+        if (first == '?' || first == '@' || first == '%') return TagKind.OPEN
+        if (hasLeadingWs) return TagKind.OTHER
+        if (!(first.isLetter() || first == '_')) return TagKind.OTHER
+        var j = i + 1
+        while (j < bodyEnd && (text[j].isLetterOrDigit() || text[j] == '_')) j++
+        val word = text.subSequence(i, j).toString().lowercase()
+        val followedByBoundary = j >= bodyEnd || !(text[j].isLetterOrDigit() || text[j] == '_')
+        if (!followedByBoundary) return TagKind.OTHER
+        return when (word) {
+            "loop", "foreach", "for", "while", "if", "each" -> TagKind.OPEN
+            "else", "elseif" -> TagKind.BRANCH
+            "end" -> TagKind.CLOSE
+            else -> TagKind.OTHER
+        }
+    }
+
+    /**
+     * Locate the `}` that closes the `{` at [openOffset], staying within
+     * the same line. Returns null on a stray `{` or a multi-line tag.
+     * `${` is treated as not-an-open (JS template-literal syntax).
+     */
+    private fun findClosingBraceOnLine(text: CharSequence, openOffset: Int): Int? {
+        var depth = 1
+        var i = openOffset + 1
+        while (i < text.length) {
+            when (text[i]) {
+                '\n' -> return null
+                '{' -> if (i > 0 && text[i - 1] == '$') { /* skip */ } else depth++
+                '}' -> {
+                    depth--
+                    if (depth == 0) return i
+                }
+            }
+            i++
+        }
+        return null
+    }
+
+    /**
+     * LIFO + indent-aware match for the closer / branch starting at
+     * [ourOpenOffset]. Walks every Sky tag before our position, keeping
+     * a depth stack of opener offsets and their line-indent widths;
+     * closers seen along the way pop the stack with indent-unwinding so
+     * a closer at outer indent skips over openers at deeper indent. Our
+     * own indent then triggers a final unwind so the caret's column
+     * decides which level we're closing.
+     */
+    private fun findMatchingOpenerForSplit(text: CharSequence, ourOpenOffset: Int): Int? {
+        val ranges = SkyTemplateRanges.computeTemplateRanges(text)
+        val stack = ArrayDeque<Pair<Int, Int>>()                       // (openerOffset, indentWidth)
+        for (range in ranges) {
+            if (range.startOffset >= ourOpenOffset) break
+            when (classifyTagKind(text, range.startOffset, range.endOffset)) {
+                TagKind.OPEN -> {
+                    stack.addLast(range.startOffset to lineIndentWidthAtOffset(text, range.startOffset))
+                }
+                TagKind.CLOSE -> {
+                    if (stack.isNotEmpty()) {
+                        val closerIndent = lineIndentWidthAtOffset(text, range.startOffset)
+                        while (stack.isNotEmpty() && stack.last().second > closerIndent) {
+                            stack.removeLast()
+                        }
+                        if (stack.isNotEmpty()) stack.removeLast()
+                    }
+                }
+                else -> {}
+            }
+        }
+        val ourIndent = lineIndentWidthAtOffset(text, ourOpenOffset)
+        while (stack.isNotEmpty() && stack.last().second > ourIndent) {
+            stack.removeLast()
+        }
+        return stack.lastOrNull()?.first
+    }
+
+    private fun lineStartOfOffset(text: CharSequence, offset: Int): Int {
+        var i = offset
+        while (i > 0 && text[i - 1] != '\n') i--
+        return i
+    }
+
+    private fun lineIndentStringAtOffset(text: CharSequence, offset: Int): String {
+        val start = lineStartOfOffset(text, offset)
+        var i = start
+        while (i < text.length && (text[i] == ' ' || text[i] == '\t')) i++
+        return text.subSequence(start, i).toString()
+    }
+
+    private fun lineIndentWidthAtOffset(text: CharSequence, offset: Int): Int {
+        val start = lineStartOfOffset(text, offset)
+        var i = start
+        var w = 0
+        while (i < text.length && (text[i] == ' ' || text[i] == '\t')) {
+            w++
+            i++
+        }
+        return w
+    }
 
     /**
      * Inspect [text] just before [caretOffset] and decide whether this Enter
@@ -190,7 +634,13 @@ object SkyTemplateEnterHandlerLogic {
         val indent = lineIndentBefore(text, openOffset)
 
         // Auto-`{/}` policy:
-        //   - BLOCK_OPEN: insert `{/}` unless the same line already has one.
+        //   - BLOCK_OPEN: insert `{/}` when the just-typed opener has no
+        //     matching closer under the SAME indent-aware pairing rules
+        //     used by inspections / folding (LIFO with indent-unwinding —
+        //     a closer at outer indent skips over openers at deeper
+        //     indent, leaving them unpaired). This catches both the
+        //     "fresh top-level opener" case and the "matching `{/}`
+        //     exists but at a wrong indent for this opener" case.
         //   - BRANCH (`{:}`, `{else}`, `{elseif}`): NEVER insert `{/}`.
         //     Branches always sit inside an existing block; the surrounding
         //     opener was almost certainly auto-closed when the user typed
@@ -198,11 +648,15 @@ object SkyTemplateEnterHandlerLogic {
         //     another `{/}` just duplicates the closer. The user still
         //     gets the indented blank line for the branch body.
         val needsAutoClose = when (kind) {
-            OpeningKind.BLOCK_OPEN -> !lineAfterContainsCloser(text, caretOffset)
+            OpeningKind.BLOCK_OPEN -> openerIsUnpaired(text, openOffset)
             OpeningKind.BRANCH -> false
         }
 
-        return EnterAnalysis(indent = indent, needsAutoClose = needsAutoClose)
+        return EnterAnalysis(
+            indent = indent,
+            needsAutoClose = needsAutoClose,
+            openerOffset = openOffset,
+        )
     }
 
     /**
@@ -338,21 +792,32 @@ object SkyTemplateEnterHandlerLogic {
     }
 
     /**
-     * Look ahead from [offset] until end-of-line and return true if the
-     * remainder of the current line contains a `{/}` or `{end}` closer.
-     * Used to suppress auto-close insertion when the user has already typed
-     * (or pasted) the closer on the same line.
+     * Indent-aware pairing check: returns true when the opener at
+     * [openOffset] would be left unpaired by the same algorithm that
+     * `SkyTemplateFoldingScanner.analyze` runs for inspections — LIFO
+     * with indent-unwinding (a closer at outer indent skips over openers
+     * at deeper indent, leaving them unpaired).
+     *
+     * This handles three cases simple opens-vs-closes balance gets wrong:
+     *   - "matching `{/}` exists but at outer indent than the new
+     *     opener" → unpaired → still insert (the existing closer logically
+     *     matches an enclosing opener, not ours).
+     *   - "nested edit inside an already-closed block" → 2 opens,
+     *     1 close. Indent-unwinding pops the inner opener as unpaired
+     *     and pairs the outer with the existing `{/}`, so the new opener
+     *     is unpaired → insert.
+     *   - "balanced file but new opener typed below an unrelated
+     *     `{/}`/branch fragment" → the upstream `{/}` already paired
+     *     (LIFO), so the new opener is unpaired → insert.
+     *
+     * Branches (`{:}`, `{else}`, `{elseif}`) participate in pairing
+     * elsewhere but are not openers, so they neither block nor satisfy
+     * a closer — handled by the scanner the same way pairing logic
+     * does in inspection/folding code.
      */
-    private fun lineAfterContainsCloser(text: CharSequence, offset: Int): Boolean {
-        var i = offset
-        while (i < text.length && text[i] != '\n') i++
-        val tail = text.subSequence(offset, i).toString()
-        // Cheap substring scan — these are short tails, and false positives
-        // (e.g. `{/}` inside a string literal on the same line) just suppress
-        // the auto-close, which degrades to a no-op rather than a bug.
-        return tail.contains("{/}") || endTagPattern.containsMatchIn(tail)
+    private fun openerIsUnpaired(text: CharSequence, openOffset: Int): Boolean {
+        val analysis = SkyTemplateFoldingScanner.analyze(text)
+        return analysis.unpairedOpens.any { it.range.startOffset == openOffset }
     }
 
-    /** `{end}` with optional internal whitespace — `{ end }` should also count. */
-    private val endTagPattern = Regex("""\{\s*end\s*}""", RegexOption.IGNORE_CASE)
 }

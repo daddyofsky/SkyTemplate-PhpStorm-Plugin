@@ -185,4 +185,74 @@ class SkyTemplateEnterHandlerLogicTest {
     @Test fun caretAtZero_returnsNull() {
         assertNull(SkyTemplateEnterHandlerLogic.analyzeBefore("{loop x}", 0))
     }
+
+    // —— Indent-aware pairing suppression ——
+    //
+    // Auto-close fires when the just-typed opener has no matching closer
+    // under LIFO + indent-unwinding pairing (the same rule inspections /
+    // folding use). A `{/}` that exists in the file but pairs with some
+    // OTHER opener — or is at outer indent than the new opener — still
+    // leaves the new opener unpaired, so a fresh `{/}` is inserted.
+
+    @Test fun existingDownstreamCloser_suppressesAutoClose_prefixIf() {
+        // `{?foo}` pairs with the downstream `{/}` → suppress.
+        val a = analyse("{?foo}<caret>\n  body\n{/}")
+        assertNotNull(a)
+        assertFalse(a!!.needsAutoClose)
+    }
+
+    @Test fun existingDownstreamCloser_suppressesAutoClose_prefixAt() {
+        val a = analyse("{@items}<caret>\n  body\n{/}")
+        assertNotNull(a)
+        assertFalse(a!!.needsAutoClose)
+    }
+
+    @Test fun existingDownstreamEndKeyword_suppressesAutoClose() {
+        val a = analyse("{loop xs}<caret>\n  body\n{end}")
+        assertNotNull(a)
+        assertFalse(a!!.needsAutoClose)
+    }
+
+    @Test fun upstreamCloserDoesNotMatch_addsCloser() {
+        // The `{/}` above the caret has nothing to pair with at file
+        // level — it is an orphan close of a parent fragment. The new
+        // `{?cond}` typed below it has no matching closer, so insert.
+        val a = analyse("{:case red}\n  red\n{/}\n{?cond}<caret>")
+        assertNotNull(a)
+        assertTrue(a!!.needsAutoClose)
+    }
+
+    @Test fun balancedUpstreamBlockPlusNewOpener_addsCloser() {
+        // The upstream `{loop xs}…{/}` pair is already balanced; the
+        // new `{?foo}` below has no closer → insert.
+        val a = analyse("{loop xs}\n  body\n{/}\n{?foo}<caret>")
+        assertNotNull(a)
+        assertTrue(a!!.needsAutoClose)
+    }
+
+    @Test fun nestedOpenerInsideAlreadyClosedBlock_addsCloser() {
+        // Indent-unwinding: the outer `{/}` (col 0) pops the deeper inner
+        // `{?foo}` (col 2) as unpaired before pairing with `{loop xs}`,
+        // so the freshly typed `{?foo}` needs its own closer.
+        val a = analyse("{loop xs}\n  {?foo}<caret>\n  body\n{/}")
+        assertNotNull(a)
+        assertTrue(a!!.needsAutoClose)
+    }
+
+    @Test fun openerBeforeDifferentBlock_addsCloser() {
+        // `{?foo}` is unpaired (the downstream `{/}` matches the inner
+        // `{loop xs}`), so insert.
+        val a = analyse("{?foo}<caret>\nplain\n{loop xs}\n  body\n{/}")
+        assertNotNull(a)
+        assertTrue(a!!.needsAutoClose)
+    }
+
+    @Test fun closerAtOuterIndentThanOpener_addsCloser() {
+        // `{?foo}` is at col 4 but the only downstream `{/}` is at col 0,
+        // so it cannot logically own the new opener. Indent-unwinding
+        // marks `{?foo}` unpaired → insert.
+        val a = analyse("    {?foo}<caret>\n  body\n{/}")
+        assertNotNull(a)
+        assertTrue(a!!.needsAutoClose)
+    }
 }

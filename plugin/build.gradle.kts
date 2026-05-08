@@ -6,7 +6,7 @@ plugins {
 }
 
 group = "com.novaframework"
-version = "1.1.0"
+version = "1.1.5"
 
 repositories {
     mavenCentral()
@@ -88,4 +88,25 @@ tasks {
         // Allocate a comfortable heap for sandbox runs.
         jvmArgs("-Xmx2g")
     }
+    // Distribution artifact name: `skytemplate-phpstorm-v<version>.zip`.
+    // Overrides the default `<rootProject.name>-<version>.zip`
+    // (`template-lang-1.1.0.zip`) so the published zip carries the public
+    // plugin name and a `v`-prefixed version, matching the release-asset
+    // convention. The bundled JAR (`lib/<base>-<version>.jar`) gets the
+    // same base name so the inner artifact lines up with the outer ZIP.
+    buildPlugin {
+        archiveBaseName.set("skytemplate-phpstorm")
+        archiveVersion.set("v${project.version}")
+    }
+    jar {
+        archiveBaseName.set("skytemplate-phpstorm")
+    }
+    // The IntelliJ Platform plugin's `instrumentedJar` (custom subtype) and
+    // `composedJar` each produce their own archive — the bundled
+    // `lib/<jar>.jar` comes from `composedJar`, so its base name has to be
+    // set explicitly. Use the `AbstractArchiveTask` supertype since
+    // `instrumentedJar` is not a `Jar`.
+    withType(org.gradle.api.tasks.bundling.AbstractArchiveTask::class.java)
+        .matching { it.name in setOf("instrumentedJar", "composedJar", "jarSearchableOptions") }
+        .configureEach { archiveBaseName.set("skytemplate-phpstorm") }
 }
