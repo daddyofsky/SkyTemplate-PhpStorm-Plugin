@@ -28,6 +28,26 @@ class SkyTemplateCommentRangesTest {
         assertEquals("{* hi *}", text.substring(r[0].startOffset, r[0].endOffset))
     }
 
+    @Test fun nestedCommentIsOneRangeSpanningOuterPair() {
+        // Nested `{*…*}` must collapse into a single range bounded by the
+        // OUTER pair, so the inner comment (and the text after the inner
+        // close) are fully neutralised by the outer comment.
+        val text = "x {* a {* b *} c *} y"
+        val r = comments(text)
+        assertEquals(1, r.size)
+        assertEquals("{* a {* b *} c *}", text.substring(r[0].startOffset, r[0].endOffset))
+    }
+
+    @Test fun nestedCommentDoesNotLeakInnerCloseAsTemplate() {
+        // Regression for the leak: the ` c ` after the inner `*}` must NOT be
+        // treated as live (outer) content, and no `{ … }` inside the comment
+        // should register as a template range.
+        val text = "{* {loop xs as x} {* inner *} {/} *}"
+        val templateRanges = SkyTemplateRanges.computeTemplateRanges(text)
+        assertEquals(1, templateRanges.size)
+        assertEquals(text, text.substring(templateRanges[0].startOffset, templateRanges[0].endOffset))
+    }
+
     @Test fun plainMultiLineSpansAcrossNewlines() {
         val text = "<div>\n  {* line1\n     line2\n     line3 *}\n</div>"
         val r = comments(text)

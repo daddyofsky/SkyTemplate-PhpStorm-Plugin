@@ -13,7 +13,7 @@ import com.novaframework.templatelang.sky.SkyTemplateFileType
  * `incl`, `cmt`, …).
  *
  * **Active when**:
- *   - the file is a SkyTemplate file (`*.sky` / `*.skyhtml`), and the caret
+ *   - the file is a SkyTemplate file (`*.sky`), and the caret
  *     is NOT inside a `{* … *}` comment, OR
  *   - the file is HTML / XHTML / XML and the caret is in the document body —
  *     specifically NOT inside `<script>`, NOT inside `<style>`, and NOT

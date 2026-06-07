@@ -85,6 +85,105 @@ object SkyTemplateRanges {
         return ranges
     }
 
+    /** `<script>` / `<style>` — embedded JS / CSS, owned by a real formatter. */
+    private val EMBEDDED_CODE_TAGS = setOf("script", "style")
+
+    /**
+     * Body ranges of `<script>` / `<style>` elements whose content holds at
+     * least one SkyTemplate tag.
+     *
+     * **Why.** In an `*.html` host the `<script>` body is lexer-embedded
+     * JavaScript and `<style>` is embedded CSS — a real formatter that reads
+     * `{…}` as code. On Reformat it mangles the whole region: it pushes the
+     * `;` of `const a = {=foo};` onto its own line, breaks an inline
+     * `{?var}true{:}false{/}` across lines, inserts blank lines around the
+     * tags, and re-indents the body wrongly. None of that is fixable tag by
+     * tag — the damage lands in the whitespace BETWEEN tags — so the
+     * pre/post-format pair snapshots each such body and restores it verbatim,
+     * leaving SkyTemplate-structured embedded code as the user wrote it (the
+     * plugin's own block re-indent still runs on top afterwards).
+     *
+     * A `<script>` / `<style>` with NO SkyTemplate tag is left out, so a
+     * genuine JS object literal (`const x = {a: 1, b: 2}`) or plain CSS still
+     * gets formatted normally by the host.
+     *
+     * Body span is strictly between the open tag's `>` and the matching
+     * `</script>` / `</style>`; the delimiters stay HTML-owned. An
+     * unterminated element extends to EOF.
+     */
+    fun computeProtectedEmbeddedRanges(text: CharSequence): List<TextRange> {
+        if (text.length < 2 || '<' !in text) return emptyList()
+        val tags = computeTemplateRanges(text)
+        if (tags.isEmpty()) return emptyList()
+
+        val result = ArrayList<TextRange>()
+        val n = text.length
+        var i = 0
+        while (i < n - 1) {
+            if (text[i] != '<' || !text[i + 1].isLetter()) { i++; continue }
+            var j = i + 1
+            while (j < n && text[j].isLetterOrDigit()) j++
+            val name = text.subSequence(i + 1, j).toString().lowercase()
+            if (name !in EMBEDDED_CODE_TAGS) { i = j; continue }
+
+            val openEnd = scanTagClose(text, i, n)
+            if (openEnd == null) { i = j; continue }
+            val bodyStart = openEnd + 1
+            val closeStart = indexOfCloseTag(text, name, bodyStart, n)
+            val bodyEnd = closeStart ?: n
+            if (bodyEnd > bodyStart && anyOverlap(tags, bodyStart, bodyEnd)) {
+                result += TextRange(bodyStart, bodyEnd)
+            }
+            i = if (closeStart != null) (scanTagClose(text, closeStart, n) ?: closeStart) + 1 else n
+        }
+        result.sortBy { it.startOffset }
+        return result
+    }
+
+    /**
+     * Offset of the `>` that closes the tag opening at [openOffset], honouring
+     * single / double quoted attribute values so `<a title=">">` finds the
+     * right `>`. Null when the tag does not close before [end].
+     */
+    private fun scanTagClose(text: CharSequence, openOffset: Int, end: Int): Int? {
+        var i = openOffset + 1
+        var quote = ' '
+        while (i < end) {
+            val c = text[i]
+            if (quote != ' ') {
+                if (c == quote) quote = ' '
+            } else when (c) {
+                '"', '\'' -> quote = c
+                '>' -> return i
+            }
+            i++
+        }
+        return null
+    }
+
+    /**
+     * Start offset of the next `</name …>` closer at or after [from]
+     * (case-insensitive, word-boundary terminated), or null if none before
+     * [end]. Per the HTML rule the first such closer ends the element.
+     */
+    private fun indexOfCloseTag(text: CharSequence, name: String, from: Int, end: Int): Int? {
+        var i = from
+        while (i < end - 1) {
+            if (text[i] == '<' && text[i + 1] == '/') {
+                var k = i + 2
+                var m = 0
+                while (k < end && m < name.length && text[k].lowercaseChar() == name[m]) { k++; m++ }
+                if (m == name.length &&
+                    (k >= end || text[k] == '>' || text[k] == '/' || text[k].isWhitespace())
+                ) {
+                    return i
+                }
+            }
+            i++
+        }
+        return null
+    }
+
     /**
      * Locate every `{` … `}` pair in [text], respecting nested braces and
      * skipping any pair whose `{` falls inside an exclusion zone (comment /
@@ -269,6 +368,168 @@ object SkyTemplateRanges {
 
         ranges.sortBy { it.startOffset }
         return ranges
+    }
+
+    /**
+     * Indent-only ranges: [computeTemplateRanges] plus the block-shaped
+     * template tags that sit INSIDE `{*…*}` comment bodies.
+     *
+     * Comments neutralise their content for every other consumer (errors,
+     * references, semantic colour, …) — see [computeTemplateRanges] / the
+     * comment-range exclusions. The indenter is the one exception: a
+     * `{loop}…{/}` written inside a comment is inert, but the user still wants
+     * its body to indent under the opener, on par with HTML tags inside the
+     * same comment. Only the indent walkers may use this; everyone else MUST
+     * keep using [computeTemplateRanges] so neutralisation is preserved.
+     *
+     * Nested `{*…*}` markers inside the comment body are skipped — they are
+     * comment delimiters, not block tags.
+     */
+    fun computeIndentRanges(text: CharSequence): List<TextRange> {
+        val base = computeTemplateRanges(text)
+        if ("{*" !in text) return base
+        val comments = computeCommentRanges(text)
+        if (comments.isEmpty()) return base
+        val result = ArrayList(base)
+        for (c in comments) {
+            collectCommentInnerTagPairs(text, c.startOffset + 2, c.endOffset - 2, result)
+        }
+        result.sortBy { it.startOffset }
+        return result
+    }
+
+    /**
+     * Append every `{ … }` pair in `[from, to)` that [looksLikeTemplateBody]
+     * accepts. Nested `{*…*}` spans are skipped whole (their inner braces are
+     * comment text, not tags). Mirrors [findBracePairs]'s depth tracking but
+     * scoped to a single comment body and without the external exclusion list.
+     */
+    private fun collectCommentInnerTagPairs(
+        text: CharSequence,
+        from: Int,
+        to: Int,
+        out: ArrayList<TextRange>,
+    ) {
+        if (from >= to) return
+        val openStack = ArrayDeque<Int>()
+        var i = from
+        while (i < to) {
+            val c = text[i]
+            // Skip a nested `{*…*}` comment whole (balanced).
+            if (c == '{' && i + 1 < to && text[i + 1] == '*') {
+                var depth = 1
+                var j = i + 2
+                while (j < to - 1) {
+                    if (text[j] == '{' && text[j + 1] == '*') { depth++; j += 2; continue }
+                    if (text[j] == '*' && text[j + 1] == '}') {
+                        depth--
+                        j += 2
+                        if (depth == 0) break
+                        continue
+                    }
+                    j++
+                }
+                i = if (depth == 0) j else to
+                continue
+            }
+            if (c == '{') {
+                if (i > 0 && text[i - 1] == '$') { i++; continue }
+                openStack.addLast(i)
+                i++
+            } else if (c == '}' && openStack.isNotEmpty()) {
+                val open = openStack.removeLast()
+                if (looksLikeTemplateBody(text, open, i + 1)) out += TextRange(open, i + 1)
+                i++
+            } else {
+                i++
+            }
+        }
+    }
+
+    /**
+     * Spans of Sky blocks inside which a host-language "duplicate" diagnostic
+     * (HTML `Duplicate id reference`, JS `Duplicate declaration`) is a false
+     * positive, because the HTML / JS parser sees every branch / iteration
+     * flattened into one scope:
+     *
+     *   - **LOOP block** (`{@…}`, `{%…}`, `{loop …}`, `{foreach …}`,
+     *     `{for …}`, `{while …}`, `{each …}`) — the body is emitted once per
+     *     iteration, so a single `id` / declaration written inside it is not a
+     *     real duplicate.
+     *   - **IF / switch block with at least one branch** (`{:}` / `{:case}` /
+     *     `{else}` / `{elseif}`) — the branches are mutually exclusive, so the
+     *     same `id` / declaration appearing in two different branches never
+     *     coexists at runtime.
+     *
+     * A plain `{?cond}…{/}` with NO branch is intentionally excluded — its body
+     * can still collide with identical content sitting outside the `if`, so
+     * those duplicates are kept.
+     *
+     * Span covers the opener's `{` through the matching closer's `}`. Pairing
+     * is best-effort LIFO; on malformed input the worst case is that a block
+     * is simply not recorded (no suppression), never a wrong suppression of
+     * unrelated code.
+     */
+    fun computeDuplicateSuppressionRanges(text: CharSequence): List<TextRange> {
+        if (text.isEmpty() || '{' !in text) return emptyList()
+        val ranges = computeTemplateRanges(text)
+        if (ranges.isEmpty()) return emptyList()
+
+        data class Frame(val openerStart: Int, val isLoop: Boolean, var hasBranch: Boolean)
+        val stack = ArrayDeque<Frame>()
+        val result = ArrayList<TextRange>()
+        for (r in ranges) {
+            when (classifyBlockKind(text, r.startOffset, r.endOffset)) {
+                BlockKind.OPEN_LOOP -> stack.addLast(Frame(r.startOffset, true, false))
+                BlockKind.OPEN_IF -> stack.addLast(Frame(r.startOffset, false, false))
+                BlockKind.BRANCH -> stack.lastOrNull()?.hasBranch = true
+                BlockKind.CLOSE -> {
+                    val f = stack.removeLastOrNull() ?: continue
+                    if (f.isLoop || f.hasBranch) result += TextRange(f.openerStart, r.endOffset)
+                }
+                BlockKind.OTHER -> {}
+            }
+        }
+        result.sortBy { it.startOffset }
+        return result
+    }
+
+    private enum class BlockKind { OPEN_LOOP, OPEN_IF, BRANCH, CLOSE, OTHER }
+
+    /**
+     * Classify a `{ … }` tag for [computeDuplicateSuppressionRanges]. Splits
+     * the generic OPEN into loop vs if so a branch-less `{?cond}` can be
+     * distinguished from a repeating loop. Mirrors the prefix / keyword rules
+     * used by the other tag classifiers in this plugin.
+     */
+    private fun classifyBlockKind(text: CharSequence, openOffset: Int, closeEndOffset: Int): BlockKind {
+        val bodyStart = openOffset + 1
+        val bodyEnd = closeEndOffset - 1
+        if (bodyEnd <= bodyStart) return BlockKind.OTHER
+        var i = bodyStart
+        while (i < bodyEnd && (text[i] == ' ' || text[i] == '\t')) i++
+        if (i >= bodyEnd) return BlockKind.OTHER
+        val first = text[i]
+        val hasLeadingWs = i > bodyStart
+        if (first == '/') return BlockKind.CLOSE
+        if (first == ':') return BlockKind.BRANCH
+        if (first == '?' && i + 1 < bodyEnd && text[i + 1] == ':') return BlockKind.OTHER  // elvis
+        if (first == '?') return BlockKind.OPEN_IF
+        if (first == '@' || first == '%') return BlockKind.OPEN_LOOP
+        if (hasLeadingWs) return BlockKind.OTHER
+        if (!(first.isLetter() || first == '_')) return BlockKind.OTHER
+        var j = i + 1
+        while (j < bodyEnd && (text[j].isLetterOrDigit() || text[j] == '_')) j++
+        val word = text.subSequence(i, j).toString().lowercase()
+        val followedByBoundary = j >= bodyEnd || !(text[j].isLetterOrDigit() || text[j] == '_')
+        if (!followedByBoundary) return BlockKind.OTHER
+        return when (word) {
+            "loop", "foreach", "for", "while", "each" -> BlockKind.OPEN_LOOP
+            "if" -> BlockKind.OPEN_IF
+            "else", "elseif" -> BlockKind.BRANCH
+            "end" -> BlockKind.CLOSE
+            else -> BlockKind.OTHER
+        }
     }
 
     fun anyOverlap(ranges: List<TextRange>, start: Int, end: Int): Boolean {

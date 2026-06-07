@@ -15,7 +15,7 @@ import com.novaframework.templatelang.sky.SkyTemplateFoldingScanner
  * compiler cannot place such a branch and would fail.
  *
  * **Scope**: registered for the SkyTemplate, HTML, and XML languages so
- * the inspection runs in `*.sky` / `*.skyhtml` files as well as in HTML
+ * the inspection runs in `*.sky` files as well as in HTML
  * and XML hosts where SkyTemplate directives are embedded.
  *
  * Severity: ERROR.

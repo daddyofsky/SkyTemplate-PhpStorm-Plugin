@@ -6,7 +6,7 @@ plugins {
 }
 
 group = "com.novaframework"
-version = "1.1.5"
+version = "1.2.0"
 
 repositories {
     mavenCentral()
@@ -51,6 +51,18 @@ intellijPlatform {
         }
         changeNotes.set(
             """
+            <h3>1.2.0</h3>
+            <ul>
+              <li><b>Fixed</b> &mdash; False JS warnings on SkyTemplate tags inside <code>&lt;script&gt;</code>: <code>Unnecessary semicolon</code> and <code>Expression statement is not assignment or call</code>, raised by the embedded-JS parser on tokens next to a tag (e.g. the <code>;</code> after <code>{=expr};</code> or the bare branches in <code>{?var}true{:}false{/}</code>), are suppressed when a SkyTemplate tag shares the line.</li>
+              <li><b>Fixed</b> &mdash; Reformat Code no longer mangles SkyTemplate-bearing <code>&lt;script&gt;</code> / <code>&lt;style&gt;</code>: the embedded JS / CSS formatter used to split <code>{=json_encode(data)}</code> across lines, push the <code>;</code> of <code>const a = {=foo};</code> onto its own line, break an inline <code>{?var}true{:}false{/}</code> over several lines, insert blank lines around block tags, and mis-indent. The whole body of any <code>&lt;script&gt;</code> / <code>&lt;style&gt;</code> that contains a SkyTemplate tag is now snapshotted before formatting and restored verbatim after, so it survives Reformat exactly as written. A script / style with no Sky tag (a genuine JS object literal, plain CSS) still formats normally.</li>
+              <li><b>Fixed</b> &mdash; Enter indentation inside SkyTemplate-bearing <code>&lt;script&gt;</code> / <code>&lt;style&gt;</code>: the embedded JS / CSS Enter couldn&rsquo;t see <code>{?&hellip;}</code> / <code>{/}</code> block structure, so the new line missed the brace level after a JS <code>{</code>, stayed too deep after <code>{/}</code>, or lost the block indent on a blank line. The Enter handler now owns a plain Enter inside such a body and computes the combined HTML + SkyTemplate-block + host-brace indent itself. Scoped to script / style bodies that carry a SkyTemplate tag; everything else keeps the host Enter.</li>
+              <li><b>Added</b> &mdash; Branch-aware duplicate suppression: <code>Duplicate id reference</code> (HTML) and <code>Duplicate declaration</code> (JS) are no longer reported when the element sits inside a loop body or a branched <code>{?&hellip;}{:}{/}</code> / <code>{if}&hellip;{else}&hellip;{/}</code>, where the parser flattens mutually-exclusive branches into one scope. A branch-less <code>{?cond}&hellip;{/}</code> is not covered, so genuine collisions against outside content still surface.</li>
+              <li><b>Added</b> &mdash; SkyTemplate-aware re-indent on <i>Paste</i> and <i>Move Statement Up/Down</i>: block bodies inside <code>{loop}&hellip;{/}</code> / <code>{?&hellip;}</code> are re-indented to their proper depth, matching what Reformat Code settles on (previously only Reformat Code did this).</li>
+              <li><b>Added</b> &mdash; Template-tag-aware indent inside <code>{*&hellip;*}</code> comments: block tags (<code>{loop}&hellip;{/}</code>, <code>{if}</code>, <code>{:}</code>, &hellip;) drive body indentation on par with HTML, on Enter and on Reformat Code. Comment-scoped &mdash; an unbalanced opener inside a comment never shifts code that follows the comment.</li>
+              <li><b>Added</b> &mdash; Nested <code>{*&hellip;*}</code> comments: the outer comment swallows every inner <code>{*&hellip;*}</code> whole, so the entire nested block is one comment and all inner content is neutralised.</li>
+              <li><b>Fixed</b> &mdash; Rainbow Brackets (and other description-less low-severity highlights) no longer colour HTML tag <code>&lt; &gt;</code> inside <code>{*&hellip;*}</code> comments in <code>*.html</code> hosts. The highlight-info filter drops low-severity highlights that are a proper subset of a comment range, preserving the plugin&rsquo;s own full-range comment overlay.</li>
+              <li><b>Removed</b> &mdash; Stale <code>.skyhtml</code> references (never a registered file type); supported surfaces remain <code>*.sky</code> and <code>*.html</code> / <code>*.htm</code> / <code>*.xml</code> hosts.</li>
+            </ul>
             <h3>1.1.0</h3>
             <ul>
               <li><b>Added</b> &mdash; Named arguments support: <code>{=foo(name: a)}</code> in paren calls and <code>{var|fn=name: a, ##}</code> in pipe filters resolve to the PHP <code>Parameter</code> PSI (Find Usages, Go to Definition).</li>

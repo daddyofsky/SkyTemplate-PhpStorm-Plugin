@@ -24,7 +24,7 @@ import com.novaframework.templatelang.sky.SkyTemplateFileType
  * (they share the same root cause: variable assumes a deeper loop than
  * actually exists).
  *
- * Activates in `*.sky` / `*.skyhtml` files. The HTML / XML host coverage
+ * Activates in `*.sky` files. The HTML / XML host coverage
  * is handled by [SkyTemplateScopeAnnotator].
  */
 class SkyTemplateLoopScopeInspection : LocalInspectionTool() {

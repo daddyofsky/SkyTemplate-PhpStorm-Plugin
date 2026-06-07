@@ -91,7 +91,19 @@ class SkyTemplateEnterHandler : EnterHandlerDelegateAdapter() {
         }
 
         val analysis = SkyTemplateEnterHandlerLogic.analyzeBefore(text, offset)
-            ?: return EnterHandlerDelegate.Result.Continue
+        if (analysis == null) {
+            // Plain Enter inside an embedded `<script>` / `<style>` that carries
+            // SkyTemplate tags: own it. The host JS / CSS Enter can't see
+            // `{?var}` / `{/}` block structure and re-indents the new line to
+            // its own (Sky-blind) depth — and for JS it does so even after our
+            // post-Enter correction. Inserting the newline ourselves (and
+            // returning Stop) keeps the host Enter from running at all, so the
+            // combined HTML + Sky + brace indent we compute survives.
+            if (ownEmbeddedPlainEnter(file, editor, document, offset, indentStep)) {
+                return EnterHandlerDelegate.Result.Stop
+            }
+            return EnterHandlerDelegate.Result.Continue
+        }
 
         // HTML-aware lift: when the opener sits as the first child of an
         // HTML element (line above ends with `<div>` / `<ul>` / etc. and the
@@ -190,6 +202,14 @@ class SkyTemplateEnterHandler : EnterHandlerDelegateAdapter() {
             return EnterHandlerDelegate.Result.Continue
         }
 
+        // Inside a SkyTemplate-bearing `<script>` / `<style>` the host JS / CSS
+        // Enter delegate runs AFTER us and re-indents the caret line to its
+        // own (Sky-blind) depth, clobbering our correction. We detect that
+        // context here so we can both (a) feed the embedded brace depth into
+        // the indent and (b) claim the final word with `Stop` below.
+        val inEmbedded = SkyTemplateRanges.computeProtectedEmbeddedRanges(document.charsSequence)
+            .any { it.startOffset <= caretOffset && caretOffset <= it.endOffset }
+
         val indentStep = resolveIndentStep(file)
 
         // (1) Caret line — fix indent on the freshly-inserted side of
@@ -219,7 +239,46 @@ class SkyTemplateEnterHandler : EnterHandlerDelegateAdapter() {
         }
 
         PsiDocumentManager.getInstance(file.project).commitDocument(document)
-        return EnterHandlerDelegate.Result.Continue
+        // In embedded `<script>` / `<style>` the host delegate would otherwise
+        // re-indent the caret line after us; Stop keeps our combined depth.
+        return if (inEmbedded) EnterHandlerDelegate.Result.Stop
+        else EnterHandlerDelegate.Result.Continue
+    }
+
+    /**
+     * Own a plain Enter inside a SkyTemplate-bearing `<script>` / `<style>`
+     * body: insert the newline and the combined HTML + Sky + JS/CSS-brace
+     * indent ourselves, place the caret, and let the caller return Stop so
+     * the host Enter never runs. Returns false (caller falls through to the
+     * platform) when [offset] is not inside such a body.
+     *
+     * The indent = [SkyTemplatePostFormatLogic.computeIndentForLine] (HTML +
+     * Sky block depth) plus [SkyTemplateIndentContext.embeddedBraceDepth]
+     * steps (the host language's own `{` nesting the Sky walk can't see).
+     */
+    private fun ownEmbeddedPlainEnter(
+        file: PsiFile,
+        editor: Editor,
+        document: com.intellij.openapi.editor.Document,
+        offset: Int,
+        indentStep: String,
+    ): Boolean {
+        val inEmbedded = SkyTemplateRanges
+            .computeProtectedEmbeddedRanges(document.charsSequence)
+            .any { it.startOffset <= offset && offset <= it.endOffset }
+        if (!inEmbedded) return false
+
+        document.insertString(offset, "\n")
+        val text = document.charsSequence
+        val newLineStart = offset + 1
+        val base = SkyTemplatePostFormatLogic.computeIndentForLine(text, newLineStart, indentStep) ?: ""
+        val braceDepth = SkyTemplateIndentContext.embeddedBraceDepth(text, newLineStart)
+        val indent = if (braceDepth > 0) base + indentStep.repeat(braceDepth) else base
+        if (indent.isNotEmpty()) document.insertString(newLineStart, indent)
+
+        PsiDocumentManager.getInstance(file.project).commitDocument(document)
+        editor.caretModel.moveToOffset(newLineStart + indent.length)
+        return true
     }
 
     /**
@@ -245,9 +304,14 @@ class SkyTemplateEnterHandler : EnterHandlerDelegateAdapter() {
         var lineEnd = caretOffset
         while (lineEnd < text.length && text[lineEnd] != '\n') lineEnd++
 
-        val desired = SkyTemplatePostFormatLogic
+        val base = SkyTemplatePostFormatLogic
             .computeIndentForLine(text, lineStart, indentStep)
             ?: return
+        // Add the embedded JS / CSS brace nesting the Sky/HTML walk can't see
+        // (a `function () {` body inside `{?var}` sits one level deeper than
+        // the Sky body depth). Zero outside `<script>` / `<style>`.
+        val braceDepth = SkyTemplateIndentContext.embeddedBraceDepth(text, lineStart)
+        val desired = if (braceDepth > 0) base + indentStep.repeat(braceDepth) else base
 
         var firstNonWs = lineStart
         while (firstNonWs < lineEnd && (text[firstNonWs] == ' ' || text[firstNonWs] == '\t')) firstNonWs++

@@ -11,10 +11,22 @@ import com.intellij.util.xmlb.XmlSerializerUtil
 /**
  * Project-level settings for the SkyTemplate plugin.
  *
- * Single switch: enabled / disabled. Internally the same code path also
- * handles Template_ files (the two engines share the directive surface that
- * the plugin cares about — `{?expr}`, `{:}`, `{/}`, `{=expr}`, `{var|func}`,
- * `{c.NAME}`, etc.). No engine selector is exposed.
+ * Keeps only the knobs the plugin actually consumes — the master
+ * enable/disable, PHP namespace + `useClass` aliases for symbol
+ * resolution, and the file-extension whitelist. Safe-mode,
+ * template-root, and `indentBlockBody` toggles were removed in 1.1.6 —
+ * none had stable use cases (the planned safe-mode inspections never
+ * shipped, the file-extension setting alone covers what `templateRoot`
+ * was meant for, and the indent-toggle ended up unable to express
+ * per-block style preferences while violating Reformat's "convention
+ * enforcement" role; the plugin now always applies the conventional
+ * depth + 1 layout, and users wanting one-off variations adjust by
+ * hand and avoid Reformat on those files).
+ *
+ * Internally the same code path also handles Template_ files (the two
+ * engines share the directive surface that the plugin cares about —
+ * `{?expr}`, `{:}`, `{/}`, `{=expr}`, `{var|func}`, `{c.NAME}`, etc.).
+ * No engine selector is exposed.
  */
 @Service(Service.Level.PROJECT)
 @State(
@@ -34,30 +46,13 @@ class TemplateLangSettings : PersistentStateComponent<TemplateLangSettings.State
         /** `use Class as Alias` shorthand list (one per element). SkyTemplate `useClass` config mirror. */
         var useClass: MutableList<String> = mutableListOf()
 
-        /** Base directory for `{include "..."}` resolution, relative to project root. */
-        var templateRoot: String = ""
-
-        /**
-         * When true, [templateRoot] is automatically marked as a *Resource Root*
-         * in the IDE's project structure on project open and on settings apply.
-         * Default `false` — opt-in to avoid surprising existing project layouts.
-         * See `TemplateRootResourceMarker`.
-         */
-        var autoMarkTemplateRoot: Boolean = false
-
-        /** SkyTemplate `safeMode` mirror — gates safe-mode inspections. */
-        var safeMode: Boolean = false
-
-        /** SkyTemplate `funcDeny` regex mirror. Empty string = use the default. */
-        var funcDeny: String = ""
-
         /**
          * File extensions that activate SkyTemplate processing in non-`.sky`
          * host files (annotators, inspections, references, completion,
          * navigation). Compared case-insensitively as dot-less lowercase
          * strings; the configurable normalises user input on save.
          *
-         * Default `["html", "sky"]`. Add `htm` / `xml` / `skyhtml` etc.
+         * Default `["html", "sky"]`. Add `htm` / `xml` etc.
          * explicitly to opt those in. Files matching the SkyTemplate own
          * file type are always processed regardless of this list.
          */
@@ -75,10 +70,6 @@ class TemplateLangSettings : PersistentStateComponent<TemplateLangSettings.State
     val isEnabled: Boolean get() = state.enabled
     val namespace: String get() = state.namespace
     val useClass: List<String> get() = state.useClass.toList()
-    val templateRoot: String get() = state.templateRoot
-    val autoMarkTemplateRoot: Boolean get() = state.autoMarkTemplateRoot
-    val safeMode: Boolean get() = state.safeMode
-    val funcDeny: String get() = state.funcDeny
 
     /**
      * Whitelist of file extensions, normalised: trimmed, dot stripped,

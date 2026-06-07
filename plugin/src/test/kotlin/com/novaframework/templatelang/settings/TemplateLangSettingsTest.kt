@@ -18,10 +18,6 @@ class TemplateLangSettingsTest {
         assertTrue(s.enabled)
         assertEquals("\\", s.namespace)
         assertTrue(s.useClass.isEmpty())
-        assertEquals("", s.templateRoot)
-        assertFalse(s.autoMarkTemplateRoot)
-        assertFalse(s.safeMode)
-        assertEquals("", s.funcDeny)
         // File extension whitelist defaults to html + sky only — explicit
         // opt-in for htm / xml / skyhtml etc.
         assertEquals(listOf("html", "sky"), s.fileExtensions.toList())
@@ -52,10 +48,6 @@ class TemplateLangSettingsTest {
             enabled = true
             namespace = "App\\Web"
             useClass = mutableListOf("App\\Util\\F as F", "App\\Render")
-            templateRoot = "view"
-            autoMarkTemplateRoot = true
-            safeMode = true
-            funcDeny = "/^(eval|exec)$/"
             fileExtensions = mutableListOf("html", "sky", "skyhtml", "xml")
         }
         val xml = XmlSerializer.serialize(original)
@@ -63,10 +55,6 @@ class TemplateLangSettingsTest {
         assertEquals(original.enabled, restored.enabled)
         assertEquals(original.namespace, restored.namespace)
         assertEquals(original.useClass, restored.useClass)
-        assertEquals(original.templateRoot, restored.templateRoot)
-        assertEquals(original.autoMarkTemplateRoot, restored.autoMarkTemplateRoot)
-        assertEquals(original.safeMode, restored.safeMode)
-        assertEquals(original.funcDeny, restored.funcDeny)
         assertEquals(original.fileExtensions, restored.fileExtensions)
     }
 

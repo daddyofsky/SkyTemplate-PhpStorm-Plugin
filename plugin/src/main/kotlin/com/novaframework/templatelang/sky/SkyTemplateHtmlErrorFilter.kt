@@ -21,18 +21,21 @@ import com.novaframework.templatelang.settings.TemplateLangFileFilter
  *   - WEAK_WARNING and stronger from any host or injected language whose
  *     host file is HTML / XML, when the range overlaps a `{ … }`, `{* … *}`,
  *     or wrapped `<!--{ … }-->` template span.
- *   - INFORMATION-level inspection results too, but **only** inside comment
- *     ranges — the user's original example
+ *   - Low-severity highlights inside comment ranges — both subtle inspection
+ *     hints (with a description) and description-less colour highlights such
+ *     as Rainbow Brackets' per-tag `< >` colouring of the HTML PSI the
+ *     platform still builds inside a `{*…*}` comment in `*.html` host files.
+ *     The user's original example
  *       `<!--{*
  *           <ul><li>{title}</li><!--<li>{hit}</li>--></ul>
  *        *}-->`
  *     produces all kinds of HTML/PHP noise inside the wrap that we want
  *     completely silent.
  *
- * Our own annotator output uses INFORMATION level too, but it is paired with
- * a TextAttributesKey instead of a description / inspection id; we leave any
- * INFORMATION whose `description` is null untouched so the file-level comment
- * overlay is preserved.
+ * Our own file-level comment overlay ([SkyTemplateAnnotator] phase 1) is an
+ * INFORMATION highlight with a null description whose range spans the WHOLE
+ * comment; it is preserved because [suppressInsideComment] only drops
+ * description-less highlights that are a PROPER SUBSET of a comment range.
  */
 class SkyTemplateHtmlErrorFilter : HighlightInfoFilter {
 
@@ -70,14 +73,12 @@ class SkyTemplateHtmlErrorFilter : HighlightInfoFilter {
         val severity = highlightInfo.severity
         val isWeakOrStronger = severity.myVal >= HighlightSeverity.WEAK_WARNING.myVal
 
-        // Information-level highlights are usually subtle hints. We drop them
-        // only inside *comment* ranges (text-of-comment semantics) and never
-        // touch the no-description ones — those are typically annotator output.
-        val isSuppressibleInformation = !isWeakOrStronger &&
-            severity.myVal >= HighlightSeverity.INFORMATION.myVal &&
-            highlightInfo.description != null
-
-        if (!isWeakOrStronger && !isSuppressibleInformation) return true
+        // Low-severity highlights (INFORMATION hints, plus semantic / Rainbow
+        // Brackets colour highlights that carry no description) are inert text
+        // when they fall inside a `{*…*}` comment. See [suppressInsideComment].
+        if (!isWeakOrStronger) {
+            return !suppressInsideComment(highlightInfo, hostFile, hostStart, hostEnd)
+        }
 
         if (isWeakOrStronger) {
             // Whitelist: SkyTemplate's own structural-annotator output lives
@@ -96,6 +97,26 @@ class SkyTemplateHtmlErrorFilter : HighlightInfoFilter {
                 SkyTemplateRanges.anyOverlap(templateRanges, hostStart, hostEnd)
             ) {
                 return false
+            }
+
+            // Duplicate-id / duplicate-declaration false positives. The HTML /
+            // JS parser flattens every `{?…}{:}{/}` branch and every loop
+            // iteration into one scope, so identical ids / declarations across
+            // mutually-exclusive branches (or inside a repeating loop body)
+            // look like duplicates. Drop these when the highlight sits inside a
+            // loop block or a branched if/switch. A plain branch-less `{?cond}`
+            // is NOT covered, so genuine collisions against outside content
+            // still surface.
+            if (description != null &&
+                templateRanges.isNotEmpty() &&
+                isDuplicateDiagnostic(description)
+            ) {
+                val blocks = duplicateSuppressionRangesCached(hostFile)
+                if (blocks.isNotEmpty() &&
+                    blocks.any { it.startOffset <= hostStart && hostEnd <= it.endOffset }
+                ) {
+                    return false
+                }
             }
 
             // Cross-language structural errors. Constructs like `{/}` (an
@@ -118,18 +139,57 @@ class SkyTemplateHtmlErrorFilter : HighlightInfoFilter {
             ) {
                 return false
             }
-        }
 
-        if (isSuppressibleInformation) {
-            val commentRanges = commentRangesCached(hostFile)
-            if (commentRanges.isNotEmpty() &&
-                SkyTemplateRanges.anyOverlap(commentRanges, hostStart, hostEnd)
+            // JS semantic warnings raised by the embedded-JS parser on tokens
+            // that sit just outside a Sky tag's `{…}` bounds (e.g. the `;`
+            // after `{=expr}` or the bare `true`/`false` tokens in
+            // `{?var}true{:}false{/}`). Exact-range overlap misses them, so
+            // we widen the check to line granularity: drop when any template
+            // range shares a line with the offending highlight.
+            if (description != null &&
+                templateRanges.isNotEmpty() &&
+                isLikelyTemplateInducedSemanticWarning(description) &&
+                lineOverlapsTemplateRange(hostFile, hostStart, hostEnd, templateRanges)
             ) {
                 return false
             }
         }
 
         return true
+    }
+
+    /**
+     * True when a low-severity highlight at [hostStart, hostEnd) should be
+     * dropped because it sits inside a `{*…*}` comment, where every byte is
+     * inert text.
+     *
+     * Two shapes are handled:
+     *   - **description != null** — a subtle inspection / daemon hint: dropped
+     *     on any overlap with a comment range (the original behaviour).
+     *   - **description == null** — an annotator / semantic colour, including
+     *     Rainbow Brackets' per-tag `< >` colouring of the HTML PSI that the
+     *     platform still builds inside a comment in `*.html` host files. These
+     *     are dropped only when the highlight is a PROPER SUBSET of a comment
+     *     range. Our own file-level grey overlay
+     *     ([SkyTemplateAnnotator] phase 1) spans the WHOLE comment range, so
+     *     its range equals the comment range and is preserved — that overlay
+     *     is what paints the comment grey in the first place.
+     */
+    private fun suppressInsideComment(
+        highlightInfo: HighlightInfo,
+        hostFile: PsiFile,
+        hostStart: Int,
+        hostEnd: Int,
+    ): Boolean {
+        val commentRanges = commentRangesCached(hostFile)
+        if (commentRanges.isEmpty()) return false
+        if (highlightInfo.description != null) {
+            return SkyTemplateRanges.anyOverlap(commentRanges, hostStart, hostEnd)
+        }
+        return commentRanges.any { r ->
+            r.startOffset <= hostStart && hostEnd <= r.endOffset &&
+                !(r.startOffset == hostStart && r.endOffset == hostEnd)
+        }
     }
 
     private fun isHtmlLikeFile(file: PsiFile): Boolean {
@@ -183,6 +243,18 @@ class SkyTemplateHtmlErrorFilter : HighlightInfoFilter {
      * the JavaScript and CSS plugins when SkyTemplate constructs appear
      * inside `<script>` / `<style>` blocks.
      */
+    /**
+     * True for the host-language "duplicate" diagnostics that branch /
+     * loop flattening turns into false positives:
+     *   - HTML `Duplicate id reference` (platform XML duplicate-id check).
+     *   - JS `Duplicate declaration` (function / variable redeclaration).
+     * See [SkyTemplateRanges.computeDuplicateSuppressionRanges] for the
+     * containment rule that gates the actual drop.
+     */
+    private fun isDuplicateDiagnostic(description: String): Boolean =
+        description.startsWith("Duplicate id reference") ||
+            description.startsWith("Duplicate declaration")
+
     private fun isLikelyTemplateInducedSyntaxError(description: String): Boolean {
         // "Missing }", "Missing {", "Missing )", "Missing (",
         // "Missing ;", "Missing ,"
@@ -206,10 +278,62 @@ class SkyTemplateHtmlErrorFilter : HighlightInfoFilter {
         return false
     }
 
+    /**
+     * JS semantic warnings the embedded-JS parser emits around Sky tags:
+     *   - `"Unnecessary semicolon"` — the `;` after `{=expr};` belongs to the
+     *     host JS statement; the JS parser sees the tag body as a parse error
+     *     fragment and flags the following `;` as redundant.
+     *   - `"Expression statement is not assignment or call"` — bare identifiers
+     *     like `true` / `false` in `{?var}true{:}false{/}` become standalone
+     *     expression statements when the JS parser strips the surrounding tags.
+     */
+    private fun isLikelyTemplateInducedSemanticWarning(description: String): Boolean =
+        description.startsWith("Unnecessary semicolon") ||
+            description.startsWith("Expression statement is not assignment or call")
+
+    /**
+     * True when the line(s) containing `[hostStart, hostEnd)` overlap any range
+     * in [templateRanges]. Line boundaries are derived by scanning [hostFile]'s
+     * raw text: line start = char after the preceding `\n` (or 0); line end =
+     * position of the next `\n` (or end of text). This widens the overlap check
+     * from the exact highlight range to the enclosing line so that tokens
+     * adjacent to (but outside) a `{…}` tag are still caught.
+     */
+    private fun lineOverlapsTemplateRange(
+        hostFile: PsiFile,
+        hostStart: Int,
+        hostEnd: Int,
+        templateRanges: List<TextRange>,
+    ): Boolean {
+        val text = hostFile.text
+        val n = text.length
+        val clampedStart = hostStart.coerceIn(0, n)
+        val clampedEnd = hostEnd.coerceIn(0, n)
+
+        // Scan back to find the start of the line containing hostStart.
+        var lineStart = clampedStart
+        while (lineStart > 0 && text[lineStart - 1] != '\n') lineStart--
+
+        // Scan forward to find the end of the line containing hostEnd.
+        var lineEnd = clampedEnd
+        while (lineEnd < n && text[lineEnd] != '\n') lineEnd++
+
+        return SkyTemplateRanges.anyOverlap(templateRanges, lineStart, lineEnd)
+    }
+
     private fun templateRangesCached(file: PsiFile): List<TextRange> =
         CachedValuesManager.getCachedValue(file) {
             CachedValueProvider.Result.create(
                 SkyTemplateRanges.computeTemplateRanges(file.text),
+                file,
+                PsiModificationTracker.MODIFICATION_COUNT,
+            )
+        }
+
+    private fun duplicateSuppressionRangesCached(file: PsiFile): List<TextRange> =
+        CachedValuesManager.getCachedValue(file) {
+            CachedValueProvider.Result.create(
+                SkyTemplateRanges.computeDuplicateSuppressionRanges(file.text),
                 file,
                 PsiModificationTracker.MODIFICATION_COUNT,
             )

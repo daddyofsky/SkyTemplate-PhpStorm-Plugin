@@ -38,6 +38,54 @@ class SkyTemplateLexerTest {
         assertEquals(listOf(T.OUTER_CONTENT, T.COMMENT_OPEN, T.COMMENT_CONTENT, T.COMMENT_CLOSE, T.OUTER_CONTENT), types)
     }
 
+    @Test fun nestedCommentIsOneComment() {
+        // Comments nest: the outer `{*…*}` swallows the inner one whole, so
+        // the inner `{*` / `*}` are COMMENT_CONTENT, not separate tokens, and
+        // nothing leaks back to OUTER after the inner close.
+        val t = tokens("a {* x {* y *} z *} b")
+        val types = t.map { it.first }
+        assertEquals(
+            listOf(T.OUTER_CONTENT, T.COMMENT_OPEN, T.COMMENT_CONTENT, T.COMMENT_CLOSE, T.OUTER_CONTENT),
+            types,
+        )
+        assertEquals(" x {* y *} z ", t[2].second)
+        assertEquals("*}", t[3].second)
+        assertEquals(" b", t[4].second)
+    }
+
+    @Test fun deeplyNestedComment() {
+        val t = tokens("{* a {* b {* c *} d *} e *}")
+        val types = t.map { it.first }
+        assertEquals(listOf(T.COMMENT_OPEN, T.COMMENT_CONTENT, T.COMMENT_CLOSE), types)
+        assertEquals(" a {* b {* c *} d *} e ", t[1].second)
+    }
+
+    @Test fun unterminatedNestedCommentConsumesRest() {
+        // Inner pair balances but the outer never closes → the whole tail is
+        // one unterminated comment (best-effort), nothing leaks to OUTER.
+        val t = tokens("{* a {* b *} c")
+        val types = t.map { it.first }
+        assertEquals(listOf(T.COMMENT_OPEN, T.COMMENT_CONTENT), types)
+        assertEquals(" a {* b *} c", t[1].second)
+    }
+
+    @Test fun nonNestedCommentsStillCloseAtFirstBalancedClose() {
+        // Two independent comments separated by OUTER text — the first `*}`
+        // closes the first comment (depth back to 0), it does not start
+        // hunting for a second close.
+        val t = tokens("{* a *} mid {* b *}")
+        val types = t.map { it.first }
+        assertEquals(
+            listOf(
+                T.COMMENT_OPEN, T.COMMENT_CONTENT, T.COMMENT_CLOSE,
+                T.OUTER_CONTENT,
+                T.COMMENT_OPEN, T.COMMENT_CONTENT, T.COMMENT_CLOSE,
+            ),
+            types,
+        )
+        assertEquals(" mid ", t[3].second)
+    }
+
     @Test fun ifTagWithKeyword() {
         val t = tokens("{if user.isAdmin}x{/}")
         val types = t.map { it.first }

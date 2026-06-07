@@ -167,18 +167,43 @@ class SkyTemplateLexer : LexerBase() {
     // ── COMMENT ────────────────────────────────────────────────────────────────
 
     private fun scanComment() {
+        // Comments nest: a `{*` inside an open comment opens a deeper level and
+        // the matching `*}` only closes the outermost block once depth returns
+        // to zero. Inner `{*` / `*}` markers stay part of COMMENT_CONTENT, so a
+        // whole nested block is one comment and the outer pair neutralises
+        // everything inside it.
+        //
+        // On entry tokenStart is either right after the outer `{*` or, on
+        // re-entry, exactly at the balanced `*}` close. The lexer state stays
+        // STATE_IN_COMMENT only at those two boundaries — the entire nested
+        // body is emitted as a single COMMENT_CONTENT token — so depth is
+        // always 1 at entry and never needs encoding in the lexer state.
+        if (tokenStart + 1 < endOffset &&
+            buffer[tokenStart] == '*' && buffer[tokenStart + 1] == '}'
+        ) {
+            tokenEnd = tokenStart + 2
+            currentToken = T.COMMENT_CLOSE
+            state = STATE_OUTER
+            return
+        }
         var i = tokenStart
+        var depth = 1
         while (i < endOffset - 1) {
-            if (buffer[i] == '*' && buffer[i + 1] == '}') {
-                if (i > tokenStart) {
+            val c = buffer[i]
+            if (c == '{' && buffer[i + 1] == '*') {
+                depth++
+                i += 2
+                continue
+            }
+            if (c == '*' && buffer[i + 1] == '}') {
+                depth--
+                if (depth == 0) {
                     tokenEnd = i
                     currentToken = T.COMMENT_CONTENT
                     return
                 }
-                tokenEnd = i + 2
-                currentToken = T.COMMENT_CLOSE
-                state = STATE_OUTER
-                return
+                i += 2
+                continue
             }
             i++
         }

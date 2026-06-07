@@ -553,4 +553,146 @@ class SkyTemplateRangesTest {
         assertEquals(1, r.size)
         assertEquals("{name}", r[0].substring(text))
     }
+
+    // ── computeDuplicateSuppressionRanges ─────────────────────────────────
+
+    private fun dupBlocks(text: String) = SkyTemplateRanges.computeDuplicateSuppressionRanges(text)
+
+    private fun isSuppressed(text: String, offset: Int): Boolean =
+        dupBlocks(text).any { it.startOffset <= offset && offset <= it.endOffset }
+
+    @Test fun dupSuppress_branchedIf_coversBody() {
+        // {?var}A{:}B{/} — branched if ⇒ whole span is a suppression range.
+        val text = "{?var}A{:}B{/}"
+        val b = dupBlocks(text)
+        assertEquals(1, b.size)
+        assertEquals(TextRange(0, text.length), b[0])
+    }
+
+    @Test fun dupSuppress_branchlessIf_notCovered() {
+        // {?var}A{/} — no branch ⇒ NOT a suppression range (could collide
+        // with identical content outside the if).
+        assertTrue(dupBlocks("{?var}A{/}").isEmpty())
+    }
+
+    @Test fun dupSuppress_loopBody_coveredEvenWithoutBranch() {
+        // {@items}A{/} — loop body repeats ⇒ suppression range even with no branch.
+        val text = "{@items}A{/}"
+        val b = dupBlocks(text)
+        assertEquals(1, b.size)
+        assertEquals(TextRange(0, text.length), b[0])
+    }
+
+    @Test fun dupSuppress_keywordLoopAndIf() {
+        // {loop xs}A{/} loop; {if c}A{else}B{/} branched if.
+        assertEquals(1, dupBlocks("{loop xs}A{/}").size)
+        assertEquals(1, dupBlocks("{if c}A{else}B{/}").size)
+        assertTrue(dupBlocks("{if c}A{/}").isEmpty())
+    }
+
+    @Test fun dupSuppress_elseIfMarksBranch() {
+        assertEquals(1, dupBlocks("{if c}A{elseif d}B{/}").size)
+    }
+
+    @Test fun dupSuppress_offsetInsideBranchedIf() {
+        // Mirrors test/dup.html lines 17-21: divs in both branches.
+        val text = "{?var}\n\t<div id=\"test\"></div>\n{:}\n\t<div id=\"test\"></div>\n{/}"
+        val firstDiv = text.indexOf("<div")
+        val secondDiv = text.lastIndexOf("<div")
+        assertTrue(isSuppressed(text, firstDiv))
+        assertTrue(isSuppressed(text, secondDiv))
+    }
+
+    @Test fun dupSuppress_branchlessIf_offsetNotSuppressed() {
+        val text = "{?var}\n\t<div id=\"test\"></div>\n{/}\n<div id=\"test\"></div>"
+        val inside = text.indexOf("<div")
+        val outside = text.lastIndexOf("<div")
+        assertFalse(isSuppressed(text, inside))
+        assertFalse(isSuppressed(text, outside))
+    }
+
+    @Test fun dupSuppress_plainIfNestedInsideLoop_coveredByOuterLoop() {
+        // Inner if has no branch, but outer loop repeats ⇒ inner content covered.
+        val text = "{@items}{?cond}<span id=\"x\"></span>{/}{/}"
+        val span = text.indexOf("<span")
+        assertTrue(isSuppressed(text, span))
+    }
+
+    @Test fun dupSuppress_noBlocks() {
+        assertTrue(dupBlocks("<p>{name}</p>").isEmpty())
+        assertTrue(dupBlocks("").isEmpty())
+    }
+
+    // ── computeProtectedEmbeddedRanges (script/style verbatim protection) ──
+
+    private fun protectedBodies(text: String) =
+        SkyTemplateRanges.computeProtectedEmbeddedRanges(text).map { it.substring(text) }
+
+    @Test fun protected_scriptWithRawTag_bodyProtected() {
+        val text = "<script>\n  const a = {=foo()};\n</script>"
+        val b = protectedBodies(text)
+        assertEquals(1, b.size)
+        assertEquals("\n  const a = {=foo()};\n", b[0])
+    }
+
+    @Test fun protected_scriptWithoutTag_notProtected() {
+        // Pure JS object literal — no Sky tag ⇒ host formats it normally.
+        assertTrue(protectedBodies("<script>const x = {a: 1, b: 2};</script>").isEmpty())
+    }
+
+    @Test fun protected_styleWithBranches_bodyProtected() {
+        val text = "<style>\n\t{?var}\n\t\t#id {}\n\t{:}\n\t\t#id {}\n\t{/}\n</style>"
+        val b = protectedBodies(text)
+        assertEquals(1, b.size)
+        assertEquals("\n\t{?var}\n\t\t#id {}\n\t{:}\n\t\t#id {}\n\t{/}\n", b[0])
+    }
+
+    @Test fun protected_styleWithoutTag_notProtected() {
+        assertTrue(protectedBodies("<style>.foo { color: red; }</style>").isEmpty())
+    }
+
+    @Test fun protected_inlineConditionalStatement_bodyProtected() {
+        // The user-reported single-line case `const b = {?var}true{:}false{/};`.
+        val text = "<script>\n  const b = {?var}true{:}false{/};\n</script>"
+        val b = protectedBodies(text)
+        assertEquals(1, b.size)
+        assertEquals("\n  const b = {?var}true{:}false{/};\n", b[0])
+    }
+
+    @Test fun protected_scriptWithAttributes_bodyProtected() {
+        val text = "<script type=\"text/javascript\">\n  let x = {=v};\n</script>"
+        val b = protectedBodies(text)
+        assertEquals(1, b.size)
+        assertEquals("\n  let x = {=v};\n", b[0])
+    }
+
+    @Test fun protected_twoScripts_onlyTaggedOneProtected() {
+        val text = "<script>const x = {a: 1};</script>\n<script>const y = {=v};</script>"
+        val b = protectedBodies(text)
+        assertEquals(1, b.size)
+        assertEquals("const y = {=v};", b[0])
+    }
+
+    @Test fun protected_unterminatedScript_extendsToEof() {
+        val text = "<script>\n  const a = {=foo()};\n"
+        val b = protectedBodies(text)
+        assertEquals(1, b.size)
+        assertEquals("\n  const a = {=foo()};\n", b[0])
+    }
+
+    @Test fun protected_tagOutsideScript_noRegion() {
+        // HTML-context tag — not an embedded code region.
+        assertTrue(protectedBodies("<div>{?var}<span></span>{/}</div>").isEmpty())
+    }
+
+    @Test fun protected_caseInsensitiveTagNames() {
+        val text = "<SCRIPT>\n  const a = {=v};\n</SCRIPT>"
+        val b = protectedBodies(text)
+        assertEquals(1, b.size)
+    }
+
+    @Test fun protected_emptyAndNoScript() {
+        assertTrue(protectedBodies("").isEmpty())
+        assertTrue(protectedBodies("<p>{name}</p>").isEmpty())
+    }
 }

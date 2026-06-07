@@ -16,7 +16,7 @@ import com.novaframework.templatelang.sky.SkyTemplateFoldingScanner
  * or `{end}` is seen before end-of-file.
  *
  * **Scope**: registered for the SkyTemplate, HTML, and XML languages so
- * the inspection runs in `*.sky` / `*.skyhtml` files, in plain HTML / XML
+ * the inspection runs in `*.sky` files, in plain HTML / XML
  * host files where SkyTemplate directives are embedded, and in any
  * multi-tree file that mixes them. Orphan close tags (`{/}` / `{end}`
  * without an opener) remain intentionally silent — partial-template
@@ -58,7 +58,7 @@ class SkyTemplateUnclosedBlockInspection : LocalInspectionTool() {
     private fun isApplicable(file: PsiFile): Boolean {
         if (!TemplateLangFileFilter.shouldProcess(file)) return false
         // Run for any file whose VFS file type is SkyTemplate (covers
-        // `*.sky` / `*.skyhtml`) or whose primary language is HTML / XML
+        // `*.sky`) or whose primary language is HTML / XML
         // (covers host files where SkyTemplate constructs are embedded).
         if (file.fileType === SkyTemplateFileType) return true
         val lang = file.language

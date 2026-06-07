@@ -11,7 +11,7 @@ import com.novaframework.templatelang.settings.TemplateLangFileFilter
 
 /**
  * HTML / XML host coverage for the four scope/var diagnostics that the
- * three M7+ inspections cover in `*.sky` / `*.skyhtml` files
+ * three M7+ inspections cover in `*.sky` files
  * ([SkyTemplateLoopScopeInspection], [SkyTemplateRedundantAtInspection],
  * [SkyTemplateDuplicateElseInspection]).
  *

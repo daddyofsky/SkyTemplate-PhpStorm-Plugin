@@ -18,7 +18,7 @@
           <li>Suppresses HTML / XML / JS / CSS parser noise on ranges that are SkyTemplate constructs</li>
         </ul>
         Project-level configuration in <i>Settings &rarr; Tools &rarr; SkyTemplate</i>:
-        root namespace, <code>useClass</code> aliases, template root, safe-mode and func-deny mirrors.
+        root namespace, <code>useClass</code> aliases, and the file-extension whitelist.
     ]]></description>
 
     <depends>com.intellij.modules.platform</depends>
@@ -37,11 +37,6 @@
             instance="com.novaframework.templatelang.settings.TemplateLangConfigurable"
             id="com.novaframework.skytemplate.settings"
             displayName="SkyTemplate"/>
-
-        <!-- On project open, mark `templateRoot` as a Resource Root if the
-             user has enabled the auto-mark toggle in Settings. Idempotent. -->
-        <postStartupActivity
-            implementation="com.novaframework.templatelang.settings.TemplateRootStartupActivity"/>
 
         <!-- SkyTemplate -->
         <fileType
@@ -72,7 +67,7 @@
 
         <!-- Code folding for `{loop}/{if}/{foreach}/…/{/}` block tags and
              multi-line `{*…*}` comments. Registered for SkyTemplate (covers
-             `*.sky` / `*.skyhtml`) and for HTML / XML (covers `*.html` /
+             `*.sky`) and for HTML / XML (covers `*.html` /
              `*.htm` / `*.xml` host files where SkyTemplate constructs are
              embedded as plain text). The builder de-duplicates against the
              multi-tree case internally. -->
@@ -86,7 +81,7 @@
         <!-- Enter handler: auto-indent + auto-`{/}` after opening block tags
              (`{loop …}`, `{if …}`, `{foreach …}`, `{for …}`, `{while …}`,
              `{else}`, `{elseif …}`, `{?…}`, `{:…}`, `{@…}`, `{%…}`). The
-             handler internally restricts itself to `*.sky` / `*.skyhtml`
+             handler internally restricts itself to `*.sky`
              files; HTML hosts keep their default Enter behaviour. -->
         <enterHandlerDelegate
             implementation="com.novaframework.templatelang.sky.SkyTemplateEnterHandler"/>
@@ -107,10 +102,35 @@
              the level required by their nearest enclosing opener — only
              ever increasing indent, never reducing, so deeper HTML
              indents survive untouched. -->
+        <!-- Pre-format processor: in `*.html` hosts the `<script>` body is
+             lexer-embedded JS (and `<style>` is embedded CSS), so the JS / CSS
+             formatter owns those regions and splits Sky tags like
+             `{=json_encode(data)}` across lines on Reformat. This snapshots
+             each tag (RangeMarker + original text) before the host formatter
+             runs; the post-format processor restores any tag the formatter
+             mangled. See docs/design/spike-verdict-script-injection.md. -->
+        <preFormatProcessor
+            implementation="com.novaframework.templatelang.sky.SkyTemplatePreFormatProcessor"/>
+
         <postFormatProcessor
             implementation="com.novaframework.templatelang.sky.SkyTemplatePostFormatProcessor"/>
 
-        <!-- For *.sky / *.skyhtml files (where SkyTemplate is the file type):
+        <!-- Paste: PasteHandler's Indent/Reformat-on-paste does not run a
+             postFormatProcessor, so pasted Sky blocks land at the host indent
+             level. This processor re-indents the pasted region with the same
+             unified HTML+Sky walk. -->
+        <copyPastePostProcessor
+            implementation="com.novaframework.templatelang.sky.SkyTemplatePasteProcessor"/>
+
+        <!-- Move Statement Up/Down: relocates lines via adjustLineIndent,
+             which is also Sky-unaware. Extends LineMover and re-indents the
+             moved region in afterMove. Engages only for files that contain
+             SkyTemplate constructs. -->
+        <statementUpDownMover
+            implementation="com.novaframework.templatelang.sky.SkyTemplateStatementMover"
+            order="first"/>
+
+        <!-- For *.sky files (where SkyTemplate is the file type):
              multi-tree provider keeps HTML / JS / CSS PSI alongside SkyTemplate. -->
         <fileType.fileViewProviderFactory
             filetype="SkyTemplate"
@@ -232,7 +252,7 @@
 
         <!-- M7 Inspections — structural diagnostics for SkyTemplate
              directives. Registered against SkyTemplate, HTML, and XML so
-             the inspection runs in `*.sky` / `*.skyhtml` files AND in
+             the inspection runs in `*.sky` files AND in
              plain HTML / XML host files where SkyTemplate constructs are
              embedded. The inspection's isApplicable() dedupes multi-tree
              files so each unpaired open is reported once. The pairing
@@ -360,7 +380,7 @@
                    implementationClass="com.novaframework.templatelang.inspection.SkyTemplateArgumentAnnotator"/>
 
         <!-- M9 Live Templates: SkyTemplate snippets (loop, if, foreach, …).
-             Active in `*.sky` / `*.skyhtml` files (anywhere except inside a
+             Active in `*.sky` files (anywhere except inside a
              `{*…*}` comment) and in HTML / XML host files (anywhere in the
              document body, except inside <script>, <style>, or `{*…*}`). -->
         <defaultLiveTemplates file="liveTemplates/SkyTemplate"/>
@@ -369,7 +389,7 @@
             implementation="com.novaframework.templatelang.sky.live.SkyTemplateContextType"/>
 
         <!-- M9 File templates: New → SkyTemplate File menu — Empty (*.sky)
-             and Page (*.skyhtml) starters. The actual `*.ft` content lives
+             and Page (*.html) starters. The actual `*.ft` content lives
              under `resources/fileTemplates/`. -->
         <fileTemplateGroup
             implementation="com.novaframework.templatelang.sky.SkyTemplateFileTemplates"/>
@@ -423,4 +443,36 @@
             language="SkyTemplate"
             implementationClass="com.novaframework.templatelang.reference.SkyTemplateInlayParameterHintsProvider"/>
     </extensions>
+
+    <actions>
+        <!--
+            Sky block layout actions. Both target the innermost
+            `{?…}` / `{@…}` / `{loop …}` / `{foreach …}` block under
+            the caret (with branches and the matching closer) and
+            transform between single-line and multi-line shapes.
+
+            "Join" collapses a multi-line block to one line; "Split"
+            expands a one-line block to a properly indented multi-line
+            shape. Each action is enabled only when its transformation
+            applies (Join needs a multi-line block; Split needs a
+            single-line block).
+
+            Default keymap is empty — users assign their own bindings
+            via Settings → Keymap → SkyTemplate.
+        -->
+        <action
+            id="SkyTemplate.JoinBlock"
+            class="com.novaframework.templatelang.sky.SkyTemplateJoinBlockAction"
+            text="Join Sky Block"
+            description="Collapse the SkyTemplate block under the caret to a single line.">
+            <add-to-group group-id="EditorPopupMenu" anchor="last"/>
+        </action>
+        <action
+            id="SkyTemplate.SplitBlock"
+            class="com.novaframework.templatelang.sky.SkyTemplateSplitBlockAction"
+            text="Split Sky Block"
+            description="Expand the single-line SkyTemplate block under the caret to a multi-line layout.">
+            <add-to-group group-id="EditorPopupMenu" anchor="last"/>
+        </action>
+    </actions>
 </idea-plugin>

@@ -12,7 +12,7 @@ import com.intellij.psi.PsiElement
 import com.novaframework.templatelang.settings.TemplateLangFileFilter
 
 /**
- * Code-folding for SkyTemplate files (`*.sky` / `*.skyhtml`).
+ * Code-folding for SkyTemplate files (`*.sky`).
  *
  * Folds:
  *   - Block tags: `{loop …} … {/}`, `{foreach …} … {/}`, `{for …} … {/}`,
@@ -53,7 +53,7 @@ class SkyTemplateFoldingBuilder : FoldingBuilderEx(), DumbAware {
         val viewProvider = file.viewProvider
 
         // Three host categories the plugin supports:
-        //   1. `*.sky` / `*.skyhtml` — multi-tree, base language is SkyTemplate.
+        //   1. `*.sky` — multi-tree, base language is SkyTemplate.
         //      The platform fires this builder twice (once for the SkyTemplate
         //      root, once for the HTML data root). Run only when invoked on
         //      the SkyTemplate root to avoid duplicate descriptors.
