@@ -206,6 +206,216 @@ class SkyTemplatePhpResolveIntegrationTest : BasePlatformTestCase() {
         assertNotNull("Format::trimAll should resolve via pipe form", methodRef.resolve() as? Method)
     }
 
+    // ── formatter-class pipe filters (1.2.3) ──────────────────────────────────
+
+    /**
+     * SkyTemplate compiler: `parseFunction()` checks
+     * `method_exists($this->formatter, $func)` before falling back to a plain
+     * function call — a `{price|money}` pipe compiles to `_F::money(...)`
+     * when the configured formatter class has a `money` method. The plugin
+     * must resolve the same names to the formatter method.
+     */
+    fun testPipeFilterResolvesToFormatterMethod() {
+        myFixture.addFileToProject(
+            "Formatter.php",
+            """
+            <?php
+            class SkyFormatter {
+                public static function money(int ${'$'}amount, int ${'$'}digits = 0): string { return ''; }
+            }
+            """.trimIndent()
+        )
+        IndexingTestUtil.waitUntilIndexesAreReady(project)
+        TemplateLangSettings.getInstance(project).loadState(
+            TemplateLangSettings.State().apply {
+                enabled = true
+                namespace = "\\"
+                formatterClass = "SkyFormatter"
+            }
+        )
+
+        val ref = firstSkyRef("<p>{price|money}</p>", "money")
+        val resolved = ref.resolve() as? Method
+        assertNotNull("pipe filter `money` must resolve to SkyFormatter::money", resolved)
+        assertEquals("money", resolved!!.name)
+        assertEquals("SkyFormatter", resolved.containingClass?.name)
+    }
+
+    /**
+     * When BOTH a formatter method and a global function share the filter
+     * name, the compiler emits `_F::name(...)` and the function is never
+     * called — resolution must pick the method only, not union the two.
+     */
+    fun testPipeFilterFormatterMethodWinsOverGlobalFunction() {
+        myFixture.addFileToProject(
+            "dual.php",
+            """
+            <?php
+            class SkyFormatter {
+                public static function shorten(string ${'$'}s): string { return ${'$'}s; }
+            }
+            function shorten(string ${'$'}s): string { return ${'$'}s; }
+            """.trimIndent()
+        )
+        IndexingTestUtil.waitUntilIndexesAreReady(project)
+        TemplateLangSettings.getInstance(project).loadState(
+            TemplateLangSettings.State().apply {
+                enabled = true
+                namespace = "\\"
+                formatterClass = "SkyFormatter"
+            }
+        )
+
+        val ref = firstSkyRef("<p>{title|shorten}</p>", "shorten") as SkyTemplatePhpReference
+        val results = ref.multiResolve(false)
+        assertTrue("expected resolution results", results.isNotEmpty())
+        assertTrue(
+            "formatter method must win — compiler never calls the global function; " +
+                "got ${results.map { it.element?.javaClass?.simpleName }}",
+            results.all { it.element is Method },
+        )
+    }
+
+    fun testPipeFilterFallsBackToFunctionWhenFormatterLacksMethod() {
+        myFixture.addFileToProject(
+            "fallback.php",
+            """
+            <?php
+            class SkyFormatter {
+                public static function money(int ${'$'}amount): string { return ''; }
+            }
+            function customEscape(string ${'$'}s): string { return ${'$'}s; }
+            """.trimIndent()
+        )
+        IndexingTestUtil.waitUntilIndexesAreReady(project)
+        TemplateLangSettings.getInstance(project).loadState(
+            TemplateLangSettings.State().apply {
+                enabled = true
+                namespace = "\\"
+                formatterClass = "SkyFormatter"
+            }
+        )
+
+        val ref = firstSkyRef("<p>{title|customEscape}</p>", "customEscape")
+        val resolved = ref.resolve() as? PhpFunction
+        assertNotNull("filter absent from formatter must fall back to global function", resolved)
+        assertEquals("\\customEscape", resolved!!.fqn)
+    }
+
+    /** Formatter dispatch applies to pipe filters only — `{=name()}` stays a function call. */
+    fun testExpressionCallIgnoresFormatterClass() {
+        myFixture.addFileToProject(
+            "exprDual.php",
+            """
+            <?php
+            class SkyFormatter {
+                public static function nowDate(): string { return ''; }
+            }
+            function nowDate(): string { return ''; }
+            """.trimIndent()
+        )
+        IndexingTestUtil.waitUntilIndexesAreReady(project)
+        TemplateLangSettings.getInstance(project).loadState(
+            TemplateLangSettings.State().apply {
+                enabled = true
+                namespace = "\\"
+                formatterClass = "SkyFormatter"
+            }
+        )
+
+        val ref = firstSkyRef("<p>{=nowDate()}</p>", "nowDate")
+        val resolved = ref.resolve()
+        assertTrue(
+            "expression-context call must resolve to the function, not the formatter method; " +
+                "got ${resolved?.javaClass?.simpleName}",
+            resolved is PhpFunction && resolved !is Method,
+        )
+    }
+
+    /** `method_exists` sees inherited methods — `findMethodByName` must too. */
+    fun testPipeFilterResolvesInheritedFormatterMethod() {
+        myFixture.addFileToProject(
+            "inherited.php",
+            """
+            <?php
+            class BaseFormatter {
+                public static function comma(int ${'$'}n): string { return ''; }
+            }
+            class SkyFormatter extends BaseFormatter {}
+            """.trimIndent()
+        )
+        IndexingTestUtil.waitUntilIndexesAreReady(project)
+        TemplateLangSettings.getInstance(project).loadState(
+            TemplateLangSettings.State().apply {
+                enabled = true
+                namespace = "\\"
+                formatterClass = "SkyFormatter"
+            }
+        )
+
+        val ref = firstSkyRef("<p>{count|comma}</p>", "comma")
+        val resolved = ref.resolve() as? Method
+        assertNotNull("inherited formatter method must resolve (method_exists semantics)", resolved)
+        assertEquals("BaseFormatter", resolved!!.containingClass?.name)
+    }
+
+    /** Absolute-FQN formatter setting resolves without namespace inference. */
+    fun testPipeFilterResolvesWithAbsoluteFormatterFqn() {
+        myFixture.addFileToProject(
+            "NsFormatter.php",
+            """
+            <?php
+            namespace App\Lib;
+            class Fmt {
+                public static function money(int ${'$'}n): string { return ''; }
+            }
+            """.trimIndent()
+        )
+        IndexingTestUtil.waitUntilIndexesAreReady(project)
+        TemplateLangSettings.getInstance(project).loadState(
+            TemplateLangSettings.State().apply {
+                enabled = true
+                namespace = "\\"
+                formatterClass = "\\App\\Lib\\Fmt"
+            }
+        )
+
+        val ref = firstSkyRef("<p>{price|money}</p>", "money")
+        val resolved = ref.resolve() as? Method
+        assertNotNull("absolute-FQN formatter class must resolve", resolved)
+        assertEquals("Fmt", resolved!!.containingClass?.name)
+    }
+
+    /** Pipe named args (`{x|money=digits=2}`) resolve against the formatter method's parameters. */
+    fun testPipeNamedArgResolvesFormatterMethodParameter() {
+        myFixture.addFileToProject(
+            "namedArg.php",
+            """
+            <?php
+            class SkyFormatter {
+                public static function money(int ${'$'}amount, int ${'$'}digits = 0): string { return ''; }
+            }
+            """.trimIndent()
+        )
+        IndexingTestUtil.waitUntilIndexesAreReady(project)
+        TemplateLangSettings.getInstance(project).loadState(
+            TemplateLangSettings.State().apply {
+                enabled = true
+                namespace = "\\"
+                formatterClass = "SkyFormatter"
+            }
+        )
+
+        val refs = providerRefs("<p>{price|money=digits=2}</p>")
+        val paramRef = refs.firstSky(SkyTemplateRefDetector.Kind.PARAMETER_NAME, "digits")
+        val resolved = paramRef.resolve()
+        assertNotNull("named arg `digits` must resolve to the formatter method parameter", resolved)
+        assertEquals(
+            "digits",
+            (resolved as? com.jetbrains.php.lang.psi.elements.Parameter)?.name,
+        )
+    }
+
     // ── constants ─────────────────────────────────────────────────────────────
 
     fun testGlobalConstantResolves() {

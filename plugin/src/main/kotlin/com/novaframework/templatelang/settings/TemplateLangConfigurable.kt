@@ -72,6 +72,16 @@ class TemplateLangConfigurable(private val project: Project)
                                 .toList() != state.useClass.toList()
                         }
                 }
+                row("Formatter class:") {
+                    textField()
+                        .bindText({ state.formatterClass }, { state.formatterClass = it.trim() })
+                        .columns(30)
+                        .comment(
+                            "Mirrors SkyTemplate <code>formatter</code> config. Pipe filters " +
+                                "(<code>{var|func}</code>) whose name is a method of this class " +
+                                "resolve to that method instead of a global function."
+                        )
+                }
             }
 
             group("File scope") {

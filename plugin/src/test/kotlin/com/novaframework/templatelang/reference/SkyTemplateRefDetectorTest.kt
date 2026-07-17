@@ -203,6 +203,37 @@ class SkyTemplateRefDetectorTest {
         assertEquals("\\App\\Util", cls.nameInSource)
     }
 
+    @Test fun pipeFunction_flaggedAsPipeFilter() {
+        // Pipe filter names dispatch formatter-method-first in the compiler
+        // (`method_exists($formatter, $func)` → `_F::func(...)`), so the ref
+        // must carry the pipe marker for the resolver.
+        val refs = detect("{var|trim}")
+        assertEquals(1, refs.size)
+        assertTrue(refs[0].isPipeFilter)
+    }
+
+    @Test fun pipeFunction_chained_bothFlaggedAsPipeFilter() {
+        val funcs = detect("{var|trim|nl2br}").filter { it.kind == Kind.FUNCTION }
+        assertEquals(2, funcs.size)
+        assertTrue(funcs.all { it.isPipeFilter })
+    }
+
+    @Test fun pipeNamedArg_flaggedAsPipeFilter() {
+        // {var|fmt=digits=2} — the PARAMETER_NAME ref belongs to the pipe
+        // callee, which may be a formatter method.
+        val refs = detect("{var|fmt=digits=2}")
+        val param = refs.first { it.kind == Kind.PARAMETER_NAME }
+        assertTrue(param.isPipeFilter)
+        assertEquals("fmt", param.callTargetName)
+    }
+
+    @Test fun expressionFunctionCall_NOT_flaggedAsPipeFilter() {
+        // {=foo()} — expression context never consults the formatter class.
+        val refs = detect("{=foo()}")
+        assertEquals(1, refs.size)
+        assertTrue(!refs[0].isPipeFilter)
+    }
+
     // ── constants via c. ────────────────────────────────────────────────────
 
     @Test fun constant_cDot_simple() {

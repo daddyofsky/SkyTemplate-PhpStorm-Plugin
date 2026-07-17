@@ -47,8 +47,13 @@ class SkyTemplateCompletionContributor : CompletionContributor() {
         val matcher = result.prefixMatcher
 
         when (ctx) {
-            is SkyTemplateCompletionContext.Result.Function ->
+            is SkyTemplateCompletionContext.Result.Function -> {
                 offerFunctions(phpIndex, matcher, ctx.withParens, result)
+                // Pipe form (`{var|…}`, withParens=false) also dispatches to
+                // formatter-class methods — compiler checks method_exists on
+                // the configured formatter before falling back to functions.
+                if (!ctx.withParens) offerFormatterMethods(phpIndex, settings, matcher, result)
+            }
             SkyTemplateCompletionContext.Result.Constant ->
                 offerConstants(phpIndex, matcher, result)
             is SkyTemplateCompletionContext.Result.ClassMember ->
@@ -64,6 +69,31 @@ class SkyTemplateCompletionContributor : CompletionContributor() {
     ) {
         phpIndex.getAllFunctionNames(matcher).forEach { name ->
             result.addElement(buildFunctionLookup(name, withParens))
+        }
+    }
+
+    /**
+     * Methods of the configured formatter class, offered in pipe-filter
+     * position. Own methods only (matches [offerClassMembers]' static-context
+     * behaviour); inherited methods still resolve through the reference layer.
+     * Magic methods are skipped — the compiler's filter-name pattern requires
+     * a leading letter so `__call` and friends can never be written as a pipe.
+     */
+    private fun offerFormatterMethods(
+        phpIndex: PhpIndex,
+        settings: TemplateLangSettings,
+        matcher: PrefixMatcher,
+        result: CompletionResultSet,
+    ) {
+        val classes = SkyTemplateFormatterLookup.formatterClasses(phpIndex, settings)
+        val seen = HashSet<String>()
+        for (cls in classes) {
+            for (method in cls.methods) {
+                if (method.name.startsWith("__")) continue
+                if (!matcher.prefixMatches(method.name)) continue
+                if (!seen.add(method.name)) continue
+                result.addElement(buildMethodLookup(method.name, cls.name, withParens = false))
+            }
         }
     }
 

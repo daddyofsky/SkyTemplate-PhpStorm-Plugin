@@ -6,7 +6,7 @@ plugins {
 }
 
 group = "com.novaframework"
-version = "1.2.2"
+version = "1.2.3"
 
 repositories {
     mavenCentral()
@@ -54,6 +54,10 @@ intellijPlatform {
         }
         changeNotes.set(
             """
+            <h3>1.2.3</h3>
+            <ul>
+              <li><b>Added</b> &mdash; <i>Formatter class</i> setting (<i>Settings &rarr; Tools &rarr; SkyTemplate</i>) mirroring the SkyTemplate <code>formatter</code> config. Pipe filters (<code>{var|func}</code>) now resolve, navigate, and Find-Usage against the formatter class&rsquo;s methods first &mdash; matching the compiler&rsquo;s <code>method_exists</code> dispatch &mdash; and fall back to global functions otherwise. Pipe named args (<code>{x|fn=name=value}</code>) resolve against the formatter method&rsquo;s parameters, and completion after <code>{var|</code> offers the formatter&rsquo;s methods alongside global functions.</li>
+            </ul>
             <h3>1.2.2</h3>
             <ul>
               <li><b>Fixed</b> &mdash; The Enter handler and the closing-tag aligner now honor the plugin&rsquo;s master switch and file-extension whitelist &mdash; disabling the plugin really disables auto-<code>{/}</code> and indent rewriting.</li>

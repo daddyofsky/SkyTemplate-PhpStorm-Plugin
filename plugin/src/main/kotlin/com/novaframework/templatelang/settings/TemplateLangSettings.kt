@@ -12,8 +12,8 @@ import com.intellij.util.xmlb.XmlSerializerUtil
  * Project-level settings for the SkyTemplate plugin.
  *
  * Keeps only the knobs the plugin actually consumes — the master
- * enable/disable, PHP namespace + `useClass` aliases for symbol
- * resolution, and the file-extension whitelist. Safe-mode,
+ * enable/disable, PHP namespace + `useClass` aliases + formatter class
+ * for symbol resolution, and the file-extension whitelist. Safe-mode,
  * template-root, and `indentBlockBody` toggles were removed in 1.1.6 —
  * none had stable use cases (the planned safe-mode inspections never
  * shipped, the file-extension setting alone covers what `templateRoot`
@@ -47,6 +47,15 @@ class TemplateLangSettings : PersistentStateComponent<TemplateLangSettings.State
         var useClass: MutableList<String> = mutableListOf()
 
         /**
+         * Formatter class FQN — SkyTemplate `formatter` config mirror. When a
+         * pipe filter name (`{var|func}`) is a method of this class, the
+         * compiler emits `_F::func(...)` instead of a plain function call, so
+         * the plugin resolves those names against this class first.
+         * Empty = no formatter configured.
+         */
+        var formatterClass: String = ""
+
+        /**
          * File extensions that activate SkyTemplate processing in non-`.sky`
          * host files (annotators, inspections, references, completion,
          * navigation). Compared case-insensitively as dot-less lowercase
@@ -70,6 +79,7 @@ class TemplateLangSettings : PersistentStateComponent<TemplateLangSettings.State
     val isEnabled: Boolean get() = state.enabled
     val namespace: String get() = state.namespace
     val useClass: List<String> get() = state.useClass.toList()
+    val formatterClass: String get() = state.formatterClass.trim()
 
     /**
      * Whitelist of file extensions, normalised: trimmed, dot stripped,

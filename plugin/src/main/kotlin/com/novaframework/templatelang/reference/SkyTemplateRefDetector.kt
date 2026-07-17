@@ -55,8 +55,15 @@ object SkyTemplateRefDetector {
      * @property callTargetClass for PARAMETER_NAME on a static-method call
      *           (`Cls::method(name: $x)`), the class identifier text as written.
      *           `null` for a plain function call (`foo(name: $x)`) or a pipe
-     *           filter (`{var|fmt=name=value}`) — pipe filters always invoke
-     *           free functions, never methods.
+     *           filter (`{var|fmt=name=value}`) — pipe filter callees are
+     *           resolved by name at compile time (formatter method first,
+     *           then free function), never through an explicit class.
+     * @property isPipeFilter true for FUNCTION / PARAMETER_NAME refs emitted by
+     *           a pipe filter (`{var|func}`). The compiler resolves those names
+     *           formatter-method-first (`method_exists($formatter, $func)` →
+     *           `_F::func(...)`), so the resolver must apply the same order.
+     *           Expression-context calls (`{=func()}`) never consult the
+     *           formatter and keep this false.
      */
     data class Ref(
         val kind: Kind,
@@ -65,6 +72,7 @@ object SkyTemplateRefDetector {
         val classNameInSource: String? = null,
         val callTargetName: String? = null,
         val callTargetClass: String? = null,
+        val isPipeFilter: Boolean = false,
     )
 
     fun detect(text: CharSequence, baseOffset: Int = 0): List<Ref> {
@@ -272,6 +280,7 @@ object SkyTemplateRefDetector {
             kind = Kind.FUNCTION,
             rangeInHost = parsed.lastTok.toRange(baseOffset),
             nameInSource = parsed.fqn,
+            isPipeFilter = true,
         )
 
         // Pipe filter args: `|fn=arg1, name=value, ##, name2=value2`.
@@ -345,6 +354,7 @@ object SkyTemplateRefDetector {
                             nameInSource = text.substring(t.start, t.end),
                             callTargetName = callTarget,
                             callTargetClass = null,
+                            isPipeFilter = true,
                         )
                         // Skip past `=` and let the rest of the bucket be
                         // scanned as a value expression (function calls inside

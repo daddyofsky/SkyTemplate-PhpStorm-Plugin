@@ -50,6 +50,7 @@ class SkyTemplateReferenceProvider : PsiReferenceProvider() {
                         r.classNameInSource,
                         r.callTargetName,
                         r.callTargetClass,
+                        r.isPipeFilter,
                     )
                 }
             }

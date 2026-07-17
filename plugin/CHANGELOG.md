@@ -4,6 +4,32 @@ All notable changes to the **SkyTemplate** PhpStorm plugin are recorded in
 this file. The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to semantic versioning.
 
+## [1.2.3] — 2026-07-17
+
+Formatter-class method matching for pipe filters (`{var|func}`).
+
+### Added
+
+- **Formatter class setting** (*Settings → Tools → SkyTemplate → Formatter
+  class*) — mirrors the SkyTemplate `formatter` compiler config. The compiler
+  dispatches pipe filters formatter-method-first
+  (`method_exists($this->formatter, $func)` → `_F::func(...)`), falling back
+  to a plain function call; the plugin previously resolved every pipe filter
+  name as a global function only.
+- **Pipe filter resolution honors the formatter class** — `{price|money}`
+  now resolves (Go to Definition / Find Usages) to `Formatter::money()` when
+  the configured formatter class declares or inherits that method, and only
+  falls back to the global function otherwise. When a formatter method and a
+  global function share a name, the method wins — matching what the compiled
+  template actually calls. Expression-context calls (`{=func()}`) are
+  unaffected; the compiler never consults the formatter for those.
+- **Pipe named-arg parameters resolve against formatter methods** —
+  `{price|money=digits=2}` resolves `digits` to the formatter method's
+  parameter when the filter dispatches to the formatter.
+- **Completion offers formatter methods in pipe position** — typing after
+  `{var|` lists the formatter class's methods alongside global functions
+  (parenless insertion, pipe form).
+
 ## [1.2.2] — 2026-07-07
 
 Bug-fix and performance wave from the full-codebase audit recorded in

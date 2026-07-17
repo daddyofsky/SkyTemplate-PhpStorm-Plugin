@@ -8,6 +8,7 @@ import com.intellij.psi.PsiPolyVariantReferenceBase
 import com.intellij.psi.ResolveResult
 import com.jetbrains.php.PhpIndex
 import com.jetbrains.php.lang.psi.elements.PhpClass
+import com.jetbrains.php.lang.psi.elements.Function as PhpFunction
 import com.jetbrains.php.lang.psi.elements.Parameter as PhpParameter
 import com.novaframework.templatelang.settings.TemplateLangSettings
 
@@ -57,9 +58,16 @@ class SkyTemplatePhpReference(
      * For [SkyTemplateRefDetector.Kind.PARAMETER_NAME] only — when the call is
      * a static method (`Cls::method(name: $x)`), the class identifier as
      * written in the template. `null` for a free function call or for pipe
-     * filter named args (always free functions).
+     * filter named args (resolved formatter-method-first by name).
      */
     val callTargetClass: String? = null,
+    /**
+     * True for FUNCTION / PARAMETER_NAME refs emitted by a pipe filter
+     * (`{var|func}`). The compiler dispatches pipe filters formatter-method-
+     * first (`method_exists($formatter, $func)` → `_F::func(...)`), so
+     * resolution follows the same order when a formatter class is configured.
+     */
+    val isPipeFilter: Boolean = false,
 ) : PsiPolyVariantReferenceBase<PsiElement>(
     host, rangeInElement,
     // PARAMETER_NAME is soft (Phase 1 spec D-2): a callee whose parameter list
@@ -100,12 +108,21 @@ class SkyTemplatePhpReference(
         val phpIndex = PhpIndex.getInstance(project)
 
         val candidates: Collection<PsiElement> = when (kind) {
-            SkyTemplateRefDetector.Kind.FUNCTION ->
-                lookupSymbol(
-                    nameInSource, settings,
-                    fqn = { phpIndex.getFunctionsByFQN(it) },
-                    simple = { phpIndex.getFunctionsByName(it) },
-                )
+            SkyTemplateRefDetector.Kind.FUNCTION -> {
+                // Pipe filters mirror the compiler's dispatch: a formatter
+                // method with the filter's name wins and the global function
+                // is never called, so resolution must not union the two.
+                val formatterMethods = if (isPipeFilter) {
+                    SkyTemplateFormatterLookup.findMethods(phpIndex, settings, nameInSource)
+                } else emptyList()
+                formatterMethods.ifEmpty {
+                    lookupSymbol(
+                        nameInSource, settings,
+                        fqn = { phpIndex.getFunctionsByFQN(it) },
+                        simple = { phpIndex.getFunctionsByName(it) },
+                    )
+                }
+            }
             SkyTemplateRefDetector.Kind.CLASS ->
                 lookupSymbol(
                     nameInSource, settings,
@@ -150,12 +167,22 @@ class SkyTemplatePhpReference(
                         .filter { it.name == nameInSource }
                 } else {
                     // Free-function named arg (paren call OR pipe filter).
-                    lookupSymbol(
-                        targetName, settings,
-                        fqn = { phpIndex.getFunctionsByFQN(it) },
-                        simple = { phpIndex.getFunctionsByName(it) },
-                    ).flatMap { it.parameters.toList() }
-                     .filter { it.name == nameInSource }
+                    // Pipe filters check the formatter class first — the
+                    // compiled call is `_F::func(name: …)`, so the parameter
+                    // belongs to the formatter method, not a global function.
+                    val formatterMethods = if (isPipeFilter) {
+                        SkyTemplateFormatterLookup.findMethods(phpIndex, settings, targetName)
+                    } else emptyList()
+                    val callees: Collection<PhpFunction> =
+                        formatterMethods.ifEmpty {
+                            lookupSymbol(
+                                targetName, settings,
+                                fqn = { phpIndex.getFunctionsByFQN(it) },
+                                simple = { phpIndex.getFunctionsByName(it) },
+                            )
+                        }
+                    callees.flatMap { it.parameters.toList() }
+                        .filter { it.name == nameInSource }
                 }
                 parameters.toSet()
             }
