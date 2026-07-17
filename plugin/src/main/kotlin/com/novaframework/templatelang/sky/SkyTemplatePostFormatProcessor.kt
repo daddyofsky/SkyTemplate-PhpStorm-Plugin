@@ -71,25 +71,34 @@ class SkyTemplatePostFormatProcessor : PostFormatProcessor {
         if (!TemplateLangFileFilter.shouldProcess(source)) return rangeToReformat
 
         val document = source.viewProvider.document ?: return rangeToReformat
+        // Captured BEFORE restoreMangledTags — restore itself can change the
+        // document length (a mangled snapshot restores to a shorter / longer
+        // original), so comparing against a POST-restore length would miss
+        // that shift and let a no-op reindent return the stale pre-restore
+        // rangeToReformat, whose offsets no longer match the document.
+        val originalLength = document.textLength
         // Undo what the host (JS / CSS) formatter did to protected regions and
         // tags BEFORE re-indenting, so the existing pass then runs on restored
         // text (a `<script>` body comes back verbatim; a stray HTML-context tag
         // is rejoined).
         restoreMangledTags(source, document)
         val indentStep = resolveIndentStep(source)
-        val originalLength = document.textLength
         val newRange = SkyTemplatePostFormatLogic.reindent(
             text = document.charsSequence,
             range = rangeToReformat,
             indentStep = indentStep,
         ) { from, to, replacement ->
             document.replaceString(from, to, replacement)
+            SkyTemplateRangeCache.invalidate()
         }
-        // The range may have grown if we inserted characters. Clamp to the
-        // current document length defensively.
+        // The range may have grown if we inserted characters, or the
+        // document may have shrunk from restoreMangledTags. Clamp to the
+        // current document length defensively either way.
         val end = newRange.endOffset.coerceAtMost(document.textLength)
         val start = newRange.startOffset.coerceAtMost(end)
-        return if (originalLength == document.textLength) rangeToReformat
+        return if (originalLength == document.textLength) rangeToReformat.let {
+            TextRange(it.startOffset.coerceAtMost(document.textLength), it.endOffset.coerceAtMost(document.textLength))
+        }
         else TextRange(start, end)
     }
 
@@ -118,7 +127,10 @@ class SkyTemplatePostFormatProcessor : PostFormatProcessor {
             }
             marker.dispose()
         }
-        if (changed) PsiDocumentManager.getInstance(source.project).commitDocument(document)
+        if (changed) {
+            SkyTemplateRangeCache.invalidate()
+            PsiDocumentManager.getInstance(source.project).commitDocument(document)
+        }
     }
 
     private fun resolveIndentStep(file: PsiFile): String {
@@ -188,20 +200,17 @@ object SkyTemplatePostFormatLogic {
      * @property effective indent column where THIS element's opener and
      *   matching closer should sit.
      * @property childStep step to add to [effective] for any line nested
-     *   inside this frame. Always equals the project indent step for
-     *   HTML opens; for SkyTemplate opens, depends on the
-     *   `indentBlockBody` setting — `indentStep` when on (children sit
-     *   one level deeper, the conventional layout), empty string when
-     *   off (children sit at the SAME depth as the opener, useful for
-     *   long blocks that wrap a section without adding a visual level).
-     *   Recording the step per-frame lets the same stack handle mixed
-     *   HTML+Sky nesting where only Sky frames are "transparent".
+     *   inside this frame. Always equals the project indent step, for
+     *   both HTML and SkyTemplate opens. Recording the step per-frame
+     *   (rather than a single global constant) lets the same stack
+     *   handle mixed HTML+Sky nesting uniformly.
      */
     private data class StackEntry(
         val effective: String,
         val openerLine: Int,
         val kind: LineKind,
         val childStep: String,
+        val rawIndentWidth: Int,
     )
 
     /** First-non-whitespace classification for a single line. */
@@ -284,10 +293,10 @@ object SkyTemplatePostFormatLogic {
         // comments so they drive comment-body indent; the comment-scope
         // containment below stops those inner frames from leaking out.
         val skyByStart = HashMap<Int, com.intellij.openapi.util.TextRange>()
-        for (r in SkyTemplateRanges.computeIndentRanges(text)) {
+        for (r in SkyTemplateRangeCache.getIndentRanges(text)) {
             skyByStart.putIfAbsent(r.startOffset, r)
         }
-        val commentScope = CommentScope(SkyTemplateRanges.computeCommentRanges(text))
+        val commentScope = CommentScope(SkyTemplateRangeCache.getCommentRanges(text))
 
         data class Edit(val from: Int, val to: Int, val text: String)
         val edits = ArrayList<Edit>()
@@ -297,10 +306,16 @@ object SkyTemplatePostFormatLogic {
         val stack = ArrayDeque<StackEntry>()
 
         // We walk EVERY line from line 1 (not just from firstLine) — the
-        // stack has to accumulate from the top of the file or the depth
-        // would be wrong for partial-range Reformat invocations. Edits
-        // are still gated to the [firstLine, lastLine] window.
+        // stack needs the enclosing open-tag chain for partial-range
+        // invocations. Context lines OUTSIDE the [firstLine, lastLine]
+        // window anchor their frame at the line's ACTUAL indent: outside
+        // the edited region the document is ground truth, so in-window
+        // lines indent RELATIVE to the visible parent tag rather than a
+        // depth re-derived from the whole file (a shallow ancestor far
+        // above must not push the edited region deeper than what the
+        // user sees around it).
         for (line in 1..lineCount) {
+            if (line > lastLine) break
             val lineStart = lineStarts[line]
             val rawLineEnd = lineStarts.getOrElse(line + 1) { text.length }
             // Contain comment-internal block frames: restore depth on exit,
@@ -314,11 +329,38 @@ object SkyTemplatePostFormatLogic {
             if (firstNonWs == lineEnd) continue                        // pure whitespace
 
             val info = classifyLine(text, lineStart, lineEnd, firstNonWs, skyByStart)
+            val rawIndent = text.subSequence(lineStart, firstNonWs).toString()
 
+            // Indent-aware unwinding for a SKY_CLOSE: a `{/}` at outer
+            // indent than the innermost open SKY_OPEN frame means one or
+            // more inner blocks were never closed — pop them first so the
+            // closer pairs with the opener its own indent actually points
+            // at (same rule findMatchingOpener[ForSplit] / FoldingBuilder
+            // use). Only unwind when an outer frame at-or-shallower than
+            // the closer actually exists — otherwise EVERY open frame is
+            // deeper than this closer (e.g. a lone `{loop}` whose `{/}`
+            // was stripped shallower by Reformat) and the legacy
+            // one-sided "pull the closer up to the sole opener" behaviour
+            // must be preserved: pop just the top frame as the match.
+            if (info.kind == LineKind.SKY_CLOSE) {
+                val closerIndentWidth = visualWidth(rawIndent, indentStep)
+                val hasShallowerLanding = stack.any {
+                    it.kind == LineKind.SKY_OPEN && it.rawIndentWidth <= closerIndentWidth
+                }
+                if (hasShallowerLanding) {
+                    while (stack.isNotEmpty() &&
+                        stack.last().kind == LineKind.SKY_OPEN &&
+                        stack.last().rawIndentWidth > closerIndentWidth
+                    ) {
+                        stack.removeLast()
+                    }
+                }
+            }
+
+            val inWindow = line >= firstLine
             val parent = stack.lastOrNull()
             val parentEffective = parent?.effective
             val parentChildStep = parent?.childStep ?: ""
-            val rawIndent = text.subSequence(lineStart, firstNonWs).toString()
 
             // Compute `desired` for the current line. For OPEN / BODY /
             // VOID the contribution is `parent.effective + parent.childStep`
@@ -330,7 +372,7 @@ object SkyTemplatePostFormatLogic {
             val desired: String? = when (info.kind) {
                 LineKind.SKY_OPEN, LineKind.HTML_OPEN -> {
                     val baseline = if (parentEffective != null) parentEffective + parentChildStep else ""
-                    if (visualWidth(baseline) > visualWidth(rawIndent)) baseline else rawIndent
+                    if (visualWidth(baseline, indentStep) > visualWidth(rawIndent, indentStep)) baseline else rawIndent
                 }
                 LineKind.SKY_CLOSE, LineKind.HTML_CLOSE -> parentEffective
                 LineKind.SKY_BRANCH -> parentEffective
@@ -351,14 +393,14 @@ object SkyTemplatePostFormatLogic {
             //     a deeper user-typed indent expresses intent (visual
             //     emphasis, host formatter's nested HTML rules, …) and
             //     overriding it would be more hostile than helpful.
-            if (line in firstLine..lastLine && desired != null) {
+            if (inWindow && desired != null) {
                 val twoSided = info.kind == LineKind.SKY_CLOSE ||
                     info.kind == LineKind.HTML_CLOSE ||
                     info.kind == LineKind.SKY_BRANCH
                 val mustEdit = if (twoSided) {
                     rawIndent != desired
                 } else {
-                    visualWidth(rawIndent) < visualWidth(desired)
+                    visualWidth(rawIndent, indentStep) < visualWidth(desired, indentStep)
                 }
                 if (mustEdit) edits += Edit(lineStart, firstNonWs, desired)
             }
@@ -368,31 +410,21 @@ object SkyTemplatePostFormatLogic {
                     // Effective for the new frame is what we'd APPLY to
                     // this line; if we don't lift, that's the rawIndent
                     // (the user's deeper choice). Children walk off this.
-                    // Both Sky and HTML opens contribute one indent step
-                    // — the conventional depth + 1 layout, fixed policy.
-                    val effective = desired ?: rawIndent
-                    stack.addLast(StackEntry(effective, line, info.kind, indentStep))
+                    // Context lines outside the window keep their actual
+                    // indent — children in the window indent relative to
+                    // the parent as it stands in the document.
+                    val effective = if (inWindow) desired ?: rawIndent else rawIndent
+                    stack.addLast(StackEntry(effective, line, info.kind, indentStep, visualWidth(rawIndent, indentStep)))
                 }
                 LineKind.SKY_CLOSE, LineKind.HTML_CLOSE -> {
-                    // Indent-aware close pairing — pop only when it makes
-                    // structural sense. Mismatched HTML / Sky closer at
-                    // the top of the stack is a parse error from the
-                    // formatter's perspective; pop only the matching kind
-                    // so the stack stays consistent.
-                    val top = stack.lastOrNull()
-                    if (top != null && (
-                            (info.kind == LineKind.SKY_CLOSE && top.kind == LineKind.SKY_OPEN) ||
-                                (info.kind == LineKind.HTML_CLOSE && top.kind == LineKind.HTML_OPEN)
-                            )
-                    ) {
-                        stack.removeLast()
-                    } else if (top != null) {
-                        // Tolerant fallback: pop the top regardless rather
-                        // than leaving a permanent imbalance for the rest
-                        // of the file. Mismatch is a user error our indent
-                        // pass shouldn't make worse.
-                        stack.removeLast()
-                    }
+                    // Pop the top frame regardless of kind match — a
+                    // mismatched HTML / Sky closer at the top of the stack
+                    // is a parse error from the formatter's perspective,
+                    // and leaving a permanent imbalance would be worse
+                    // than tolerating the user's error. The SKY_CLOSE
+                    // indent-aware unwind above already resolved which
+                    // frame this closer actually pairs with.
+                    if (stack.isNotEmpty()) stack.removeLast()
                 }
                 else -> {}
             }
@@ -418,6 +450,14 @@ object SkyTemplatePostFormatLogic {
      * intended for the post-Enter handler that needs to know what
      * indent a freshly inserted (possibly blank) line should carry.
      *
+     * The result is RELATIVE to the nearest enclosing opener's ACTUAL
+     * indent: every preceding line's frame anchors at the indent that
+     * line carries in the document (no lift replay), so the answer is
+     * `parent.actualIndent + step` regardless of how ancestors further
+     * up are indented. A `<div>` at column 0 under an unindented
+     * `<html><body>` chain yields column-4 children, not a depth
+     * re-derived from the whole file.
+     *
      * Returns null when the line is at top level outside any block —
      * the caller should keep whatever indent the host formatter chose.
      *
@@ -437,10 +477,10 @@ object SkyTemplatePostFormatLogic {
         if (lineStart < 0 || lineStart > text.length) return null
 
         val skyByStart = HashMap<Int, com.intellij.openapi.util.TextRange>()
-        for (r in SkyTemplateRanges.computeIndentRanges(text)) {
+        for (r in SkyTemplateRangeCache.getIndentRanges(text)) {
             skyByStart.putIfAbsent(r.startOffset, r)
         }
-        val commentScope = CommentScope(SkyTemplateRanges.computeCommentRanges(text))
+        val commentScope = CommentScope(SkyTemplateRangeCache.getCommentRanges(text))
 
         val stack = ArrayDeque<StackEntry>()
 
@@ -458,15 +498,13 @@ object SkyTemplatePostFormatLogic {
             val firstNonWs = firstNonWhitespace(text, curLineStart, curLineEnd)
             if (firstNonWs < curLineEnd) {
                 val info = classifyLine(text, curLineStart, curLineEnd, firstNonWs, skyByStart)
-                val parent = stack.lastOrNull()
-                val parentEffective = parent?.effective
-                val parentChildStep = parent?.childStep ?: ""
                 val rawIndent = text.subSequence(curLineStart, firstNonWs).toString()
                 when (info.kind) {
                     LineKind.SKY_OPEN, LineKind.HTML_OPEN -> {
-                        val baseline = if (parentEffective != null) parentEffective + parentChildStep else ""
-                        val effective = if (visualWidth(baseline) > visualWidth(rawIndent)) baseline else rawIndent
-                        stack.addLast(StackEntry(effective, lineNo, info.kind, indentStep))
+                        // Anchor at the opener's ACTUAL indent — the target
+                        // line's indent is relative to the parent as it
+                        // stands in the document, not to a re-derived depth.
+                        stack.addLast(StackEntry(rawIndent, lineNo, info.kind, indentStep, visualWidth(rawIndent, indentStep)))
                     }
                     LineKind.SKY_CLOSE, LineKind.HTML_CLOSE -> {
                         if (stack.isNotEmpty()) stack.removeLast()
@@ -500,7 +538,7 @@ object SkyTemplatePostFormatLogic {
         return when (info.kind) {
             LineKind.SKY_OPEN, LineKind.HTML_OPEN -> {
                 val baseline = if (parentEffective != null) parentEffective + parentChildStep else ""
-                if (visualWidth(baseline) > visualWidth(rawIndent)) baseline else rawIndent
+                if (visualWidth(baseline, indentStep) > visualWidth(rawIndent, indentStep)) baseline else rawIndent
             }
             LineKind.SKY_CLOSE, LineKind.HTML_CLOSE -> parentEffective
             LineKind.SKY_BRANCH -> parentEffective
@@ -634,9 +672,17 @@ object SkyTemplatePostFormatLogic {
         val first = text[i]
         val hasLeadingWs = i > bodyStart
 
-        if (first == '/') return Kind.CLOSE
+        if (first == '/') {
+            // `{/}` / `{/  }` — closer with optional trailing whitespace.
+            // `{/  // comment}` — closer + line comment. Anything else
+            // (`{/foo}`) is not a closer — mirrors FoldingBuilder's rule.
+            var j = i + 1
+            while (j < bodyEnd && (text[j] == ' ' || text[j] == '\t')) j++
+            if (j >= bodyEnd) return Kind.CLOSE
+            if (j + 1 < bodyEnd && text[j] == '/' && text[j + 1] == '/') return Kind.CLOSE
+            return Kind.OTHER
+        }
         if (first == ':') return Kind.BRANCH
-        if (first == '?' && i + 1 < bodyEnd && text[i + 1] == ':') return Kind.OTHER
         if (first == '?' || first == '@' || first == '%') return Kind.OPEN
 
         if (hasLeadingWs) return Kind.OTHER
@@ -662,8 +708,19 @@ object SkyTemplatePostFormatLogic {
         return i
     }
 
-    /** Visual width: each tab counts as one character, same as the leading-ws comparison in the Enter handler. */
-    private fun visualWidth(s: String): Int = s.length
+    /**
+     * Visual width of an indent prefix: a tab counts as [indentStep]'s
+     * length (the project's indent size) rather than 1, so comparisons
+     * against a space-based indent are accurate under
+     * `USE_TAB_CHARACTER` projects — a single `\t` and `"    "` compare
+     * as equal width instead of `\t` looking 4x shallower.
+     */
+    private fun visualWidth(s: String, indentStep: String): Int {
+        val tabWidth = indentStep.length.coerceAtLeast(1)
+        var width = 0
+        for (c in s) width += if (c == '\t') tabWidth else 1
+        return width
+    }
 
     private fun lineAt(text: CharSequence, offset: Int): Int {
         var n = 1

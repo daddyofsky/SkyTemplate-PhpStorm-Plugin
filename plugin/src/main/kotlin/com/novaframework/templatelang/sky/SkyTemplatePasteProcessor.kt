@@ -87,6 +87,7 @@ class SkyTemplatePasteProcessor : CopyPastePostProcessor<TextBlockTransferableDa
                 indentStep = indentStep,
             ) { from, to, replacement ->
                 document.replaceString(from, to, replacement)
+                SkyTemplateRangeCache.invalidate()
                 changed = true
             }
             if (changed) PsiDocumentManager.getInstance(project).commitDocument(document)

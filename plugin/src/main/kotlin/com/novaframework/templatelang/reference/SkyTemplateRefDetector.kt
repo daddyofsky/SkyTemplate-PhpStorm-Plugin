@@ -688,18 +688,6 @@ object SkyTemplateRefDetector {
     private fun simpleName(qualified: String): String =
         qualified.trimStart('\\').substringAfterLast('\\')
 
-    private fun findRBrace(tokens: List<Tok>, from: Int): Int {
-        var depth = 0
-        for (i in from until tokens.size) {
-            when (tokens[i].type) {
-                T.LBRACE -> depth++
-                T.RBRACE -> if (depth == 0) return i else depth--
-                else -> {}
-            }
-        }
-        return -1
-    }
-
     private fun lexAll(text: CharSequence): List<Tok> {
         val out = ArrayList<Tok>()
         val lexer = SkyTemplateLexer()

@@ -5,6 +5,7 @@ import com.intellij.openapi.editor.Editor
 import com.intellij.openapi.project.Project
 import com.intellij.psi.PsiDocumentManager
 import com.intellij.psi.PsiFile
+import com.novaframework.templatelang.settings.TemplateLangFileFilter
 
 /**
  * Smart re-indent on closer / branch typing — the SkyTemplate analogue
@@ -49,6 +50,7 @@ class SkyTemplateClosingTagAligner : TypedHandlerDelegate() {
             lang !== com.intellij.lang.html.HTMLLanguage.INSTANCE &&
             lang !== com.intellij.lang.xml.XMLLanguage.INSTANCE
         ) return Result.CONTINUE
+        if (!TemplateLangFileFilter.shouldProcess(file)) return Result.CONTINUE
 
         val document = editor.document
         val caretOffset = editor.caretModel.offset
@@ -57,6 +59,7 @@ class SkyTemplateClosingTagAligner : TypedHandlerDelegate() {
             ?: return Result.CONTINUE
 
         document.replaceString(edit.from, edit.to, edit.replacement)
+        SkyTemplateRangeCache.invalidate()
         PsiDocumentManager.getInstance(project).commitDocument(document)
         return Result.CONTINUE
     }
@@ -126,7 +129,7 @@ object SkyTemplateClosingTagAlignerLogic {
         ourOpenOffset: Int,
         ourKind: Kind,
     ): Int? {
-        val ranges = SkyTemplateRanges.computeTemplateRanges(text)
+        val ranges = SkyTemplateRangeCache.get(text)
         // Stack of opener offsets — paired with their line indent so the
         // unwinding step can compare against the closer's indent without
         // recomputing.
@@ -185,9 +188,17 @@ object SkyTemplateClosingTagAlignerLogic {
         val first = text[i]
         val hasLeadingWs = i > bodyStart
 
-        if (first == '/') return Kind.CLOSE
+        if (first == '/') {
+            // `{/}` / `{/  }` — closer with optional trailing whitespace.
+            // `{/  // comment}` — closer + line comment. Anything else
+            // (`{/foo}`) is not a closer — mirrors FoldingBuilder's rule.
+            var j = i + 1
+            while (j < bodyEnd && (text[j] == ' ' || text[j] == '\t')) j++
+            if (j >= bodyEnd) return Kind.CLOSE
+            if (j + 1 < bodyEnd && text[j] == '/' && text[j + 1] == '/') return Kind.CLOSE
+            return Kind.OTHER
+        }
         if (first == ':') return Kind.BRANCH
-        if (first == '?' && i + 1 < bodyEnd && text[i + 1] == ':') return Kind.OTHER
         if (first == '?' || first == '@' || first == '%') return Kind.OPEN
 
         if (hasLeadingWs) return Kind.OTHER

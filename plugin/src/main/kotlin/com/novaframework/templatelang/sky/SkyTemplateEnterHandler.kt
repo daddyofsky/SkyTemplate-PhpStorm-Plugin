@@ -9,6 +9,7 @@ import com.intellij.openapi.util.Ref
 import com.intellij.psi.PsiDocumentManager
 import com.intellij.psi.PsiFile
 import com.intellij.application.options.CodeStyle
+import com.novaframework.templatelang.settings.TemplateLangFileFilter
 
 /**
  * Enter handler that auto-closes SkyTemplate block tags.
@@ -67,6 +68,7 @@ class SkyTemplateEnterHandler : EnterHandlerDelegateAdapter() {
         ) {
             return EnterHandlerDelegate.Result.Continue
         }
+        if (!TemplateLangFileFilter.shouldProcess(file)) return EnterHandlerDelegate.Result.Continue
 
         val document = editor.document
         val text = document.charsSequence
@@ -105,22 +107,24 @@ class SkyTemplateEnterHandler : EnterHandlerDelegateAdapter() {
             return EnterHandlerDelegate.Result.Continue
         }
 
-        // HTML-aware lift: when the opener sits as the first child of an
-        // HTML element (line above ends with `<div>` / `<ul>` / etc. and the
-        // opener is the first non-whitespace on its line), the user expects
-        // the body / closer to align with HTML descendants. We compute the
-        // expected indent and use it for the inserted lines AND adjust the
-        // opener line itself so Enter's result matches what
-        // [SkyTemplatePostFormatProcessor] would settle Reformat Code on.
-        val htmlExpected = SkyTemplateIndentContext
-            .expectedHtmlChildIndent(text, analysis.openerOffset, indentStep)
-        val effectiveIndent = if (htmlExpected != null && htmlExpected.length > analysis.indent.length) {
-            htmlExpected
+        // Relative lift: when the opener is the first non-whitespace on its
+        // line, compute the indent it should carry RELATIVE to the nearest
+        // enclosing opener above — HTML (`<div>`) or template (`{loop}`)
+        // alike, at that parent's ACTUAL indent + one step — and lift the
+        // opener line when it sits shallower. Inline forms
+        // (`<div>{?cond}`) are not lifted: the opener is not a structural
+        // first-child there and rewriting the line would over-indent it.
+        val openerLineStart = analysis.openerOffset - analysis.indent.length
+        val openerIsFirstOnLine = openerLineStart == 0 || text[openerLineStart - 1] == '\n'
+        val relativeExpected = if (openerIsFirstOnLine) {
+            SkyTemplatePostFormatLogic.computeIndentForLine(text, openerLineStart, indentStep)
+        } else null
+        val effectiveIndent = if (relativeExpected != null && relativeExpected.length > analysis.indent.length) {
+            relativeExpected
         } else {
             analysis.indent
         }
         val liftDelta = effectiveIndent.length - analysis.indent.length
-        val openerLineStart = analysis.openerOffset - analysis.indent.length
 
         // If we are lifting, rewrite the opener's leading-whitespace prefix
         // BEFORE inserting the rest. Doing the lift first keeps the
@@ -128,15 +132,30 @@ class SkyTemplateEnterHandler : EnterHandlerDelegateAdapter() {
         // is computed on the post-lift `offset`).
         val adjustedOffset = if (liftDelta > 0) {
             document.replaceString(openerLineStart, openerLineStart + analysis.indent.length, effectiveIndent)
+            SkyTemplateRangeCache.invalidate()
             offset + liftDelta
         } else {
             offset
+        }
+
+        // Trailing content on the opener's line (`{loop x}<caret>text`) is
+        // the block's body, not decoration after the auto-inserted `{/}` —
+        // cut it here and re-append it to the body line below instead of
+        // leaving it stuck after the closer.
+        var trailingEnd = adjustedOffset
+        while (trailingEnd < text.length && text[trailingEnd] != '\n') trailingEnd++
+        val trailing = text.subSequence(adjustedOffset, trailingEnd).toString()
+        val trailingContent = if (analysis.needsAutoClose) trailing.trimEnd() else ""
+        if (trailingContent.isNotEmpty()) {
+            document.deleteString(adjustedOffset, adjustedOffset + trailingContent.length)
+            SkyTemplateRangeCache.invalidate()
         }
 
         val insertion = buildString {
             append('\n')
             append(effectiveIndent)
             append(indentStep)
+            append(trailingContent)
             if (analysis.needsAutoClose) {
                 // Caret will be placed at the end of this prefix; the closer
                 // line follows on the next document line.
@@ -148,10 +167,12 @@ class SkyTemplateEnterHandler : EnterHandlerDelegateAdapter() {
 
         // Compute caret position BEFORE the insertion so we can place it at
         // the end of the indented blank line (just after the indent step,
-        // before the closer if there is one).
+        // before the closer if there is one) — i.e. right before any
+        // trailing content that got moved down.
         val caretAfter = adjustedOffset + 1 /* '\n' */ + effectiveIndent.length + indentStep.length
 
         document.insertString(adjustedOffset, insertion)
+        SkyTemplateRangeCache.invalidate()
         PsiDocumentManager.getInstance(file.project).commitDocument(document)
         editor.caretModel.moveToOffset(caretAfter)
 
@@ -195,6 +216,7 @@ class SkyTemplateEnterHandler : EnterHandlerDelegateAdapter() {
             lang !== com.intellij.lang.html.HTMLLanguage.INSTANCE &&
             lang !== com.intellij.lang.xml.XMLLanguage.INSTANCE
         ) return EnterHandlerDelegate.Result.Continue
+        if (!TemplateLangFileFilter.shouldProcess(file)) return EnterHandlerDelegate.Result.Continue
 
         val document = editor.document
         val caretOffset = editor.caretModel.offset
@@ -207,7 +229,7 @@ class SkyTemplateEnterHandler : EnterHandlerDelegateAdapter() {
         // own (Sky-blind) depth, clobbering our correction. We detect that
         // context here so we can both (a) feed the embedded brace depth into
         // the indent and (b) claim the final word with `Stop` below.
-        val inEmbedded = SkyTemplateRanges.computeProtectedEmbeddedRanges(document.charsSequence)
+        val inEmbedded = SkyTemplateRangeCache.getProtectedEmbeddedRanges(document.charsSequence)
             .any { it.startOffset <= caretOffset && caretOffset <= it.endOffset }
 
         val indentStep = resolveIndentStep(file)
@@ -235,6 +257,7 @@ class SkyTemplateEnterHandler : EnterHandlerDelegateAdapter() {
                 indentStep = indentStep,
             ) { from, to, replacement ->
                 document.replaceString(from, to, replacement)
+                SkyTemplateRangeCache.invalidate()
             }
         }
 
@@ -263,18 +286,27 @@ class SkyTemplateEnterHandler : EnterHandlerDelegateAdapter() {
         offset: Int,
         indentStep: String,
     ): Boolean {
-        val inEmbedded = SkyTemplateRanges
-            .computeProtectedEmbeddedRanges(document.charsSequence)
+        val inEmbedded = SkyTemplateRangeCache
+            .getProtectedEmbeddedRanges(document.charsSequence)
             .any { it.startOffset <= offset && offset <= it.endOffset }
         if (!inEmbedded) return false
 
         document.insertString(offset, "\n")
+        SkyTemplateRangeCache.invalidate()
         val text = document.charsSequence
         val newLineStart = offset + 1
         val base = SkyTemplatePostFormatLogic.computeIndentForLine(text, newLineStart, indentStep) ?: ""
-        val braceDepth = SkyTemplateIndentContext.embeddedBraceDepth(text, newLineStart)
+        val rawBraceDepth = SkyTemplateIndentContext.embeddedBraceDepth(text, newLineStart)
+        val braceDepth = if (SkyTemplateIndentContext.startsWithCloseBrace(text, newLineStart)) {
+            (rawBraceDepth - 1).coerceAtLeast(0)
+        } else {
+            rawBraceDepth
+        }
         val indent = if (braceDepth > 0) base + indentStep.repeat(braceDepth) else base
-        if (indent.isNotEmpty()) document.insertString(newLineStart, indent)
+        if (indent.isNotEmpty()) {
+            document.insertString(newLineStart, indent)
+            SkyTemplateRangeCache.invalidate()
+        }
 
         PsiDocumentManager.getInstance(file.project).commitDocument(document)
         editor.caretModel.moveToOffset(newLineStart + indent.length)
@@ -309,8 +341,16 @@ class SkyTemplateEnterHandler : EnterHandlerDelegateAdapter() {
             ?: return
         // Add the embedded JS / CSS brace nesting the Sky/HTML walk can't see
         // (a `function () {` body inside `{?var}` sits one level deeper than
-        // the Sky body depth). Zero outside `<script>` / `<style>`.
-        val braceDepth = SkyTemplateIndentContext.embeddedBraceDepth(text, lineStart)
+        // the Sky body depth). Zero outside `<script>` / `<style>`. A line
+        // that itself closes with `}` is counted by embeddedBraceDepth as
+        // still inside the brace it closes — compensate by one level so
+        // the closer aligns with the opener instead of its body.
+        val rawBraceDepth = SkyTemplateIndentContext.embeddedBraceDepth(text, lineStart)
+        val braceDepth = if (SkyTemplateIndentContext.startsWithCloseBrace(text, lineStart)) {
+            (rawBraceDepth - 1).coerceAtLeast(0)
+        } else {
+            rawBraceDepth
+        }
         val desired = if (braceDepth > 0) base + indentStep.repeat(braceDepth) else base
 
         var firstNonWs = lineStart
@@ -329,11 +369,12 @@ class SkyTemplateEnterHandler : EnterHandlerDelegateAdapter() {
         val shouldEdit = when {
             isBlank -> current != desired
             firstIsCloserOrBranch -> current != desired
-            else -> visualWidth(current) < visualWidth(desired)
+            else -> visualWidth(current, indentStep) < visualWidth(desired, indentStep)
         }
         if (!shouldEdit) return
 
         document.replaceString(lineStart, firstNonWs, desired)
+        SkyTemplateRangeCache.invalidate()
 
         val delta = desired.length - current.length
         val newCaret = when {
@@ -386,6 +427,7 @@ class SkyTemplateEnterHandler : EnterHandlerDelegateAdapter() {
         }
 
         document.insertString(offset, insertion)
+        SkyTemplateRangeCache.invalidate()
         PsiDocumentManager.getInstance(file.project).commitDocument(document)
         editor.caretModel.moveToOffset(offset + caretShift)
     }
@@ -410,7 +452,19 @@ class SkyTemplateEnterHandler : EnterHandlerDelegateAdapter() {
         return false
     }
 
-    private fun visualWidth(s: String): Int = s.length
+    /**
+     * Visual width of an indent prefix: a tab counts as [indentStep]'s
+     * length (the project's indent size) rather than 1, so comparisons
+     * against a space-based indent are accurate under
+     * `USE_TAB_CHARACTER` projects — a single `\t` and `"    "` compare
+     * as equal width instead of `\t` looking 4x shallower.
+     */
+    private fun visualWidth(s: String, indentStep: String): Int {
+        val tabWidth = indentStep.length.coerceAtLeast(1)
+        var width = 0
+        for (c in s) width += if (c == '\t') tabWidth else 1
+        return width
+    }
 
     private fun lineEndOf(text: CharSequence, offset: Int): Int {
         var i = offset
@@ -553,9 +607,17 @@ object SkyTemplateEnterHandlerLogic {
         if (i >= bodyEnd) return TagKind.OTHER
         val first = text[i]
         val hasLeadingWs = i > bodyStart
-        if (first == '/') return TagKind.CLOSE
+        if (first == '/') {
+            // `{/}` / `{/  }` — closer with optional trailing whitespace.
+            // `{/  // comment}` — closer + line comment. Anything else
+            // (`{/foo}`) is not a closer — mirrors FoldingBuilder's rule.
+            var j = i + 1
+            while (j < bodyEnd && (text[j] == ' ' || text[j] == '\t')) j++
+            if (j >= bodyEnd) return TagKind.CLOSE
+            if (j + 1 < bodyEnd && text[j] == '/' && text[j + 1] == '/') return TagKind.CLOSE
+            return TagKind.OTHER
+        }
         if (first == ':') return TagKind.BRANCH
-        if (first == '?' && i + 1 < bodyEnd && text[i + 1] == ':') return TagKind.OTHER
         if (first == '?' || first == '@' || first == '%') return TagKind.OPEN
         if (hasLeadingWs) return TagKind.OTHER
         if (!(first.isLetter() || first == '_')) return TagKind.OTHER
@@ -604,7 +666,7 @@ object SkyTemplateEnterHandlerLogic {
      * decides which level we're closing.
      */
     private fun findMatchingOpenerForSplit(text: CharSequence, ourOpenOffset: Int): Int? {
-        val ranges = SkyTemplateRanges.computeTemplateRanges(text)
+        val ranges = SkyTemplateRangeCache.get(text)
         val stack = ArrayDeque<Pair<Int, Int>>()                       // (openerOffset, indentWidth)
         for (range in ranges) {
             if (range.startOffset >= ourOpenOffset) break
@@ -678,7 +740,7 @@ object SkyTemplateEnterHandlerLogic {
 
         // Reject if the entire `{ … }` span lies inside a `{*…*}` (or
         // `<!--{*…*}-->`) comment — those should never trigger.
-        val commentRanges = SkyTemplateRanges.computeCommentRanges(text)
+        val commentRanges = SkyTemplateRangeCache.getCommentRanges(text)
         if (commentRanges.any { it.startOffset <= openOffset && caretOffset <= it.endOffset }) {
             return null
         }
@@ -880,7 +942,7 @@ object SkyTemplateEnterHandlerLogic {
      * does in inspection/folding code.
      */
     private fun openerIsUnpaired(text: CharSequence, openOffset: Int): Boolean {
-        val analysis = SkyTemplateFoldingScanner.analyze(text)
+        val analysis = SkyTemplateRangeCache.getBlockPairing(text)
         return analysis.unpairedOpens.any { it.range.startOffset == openOffset }
     }
 

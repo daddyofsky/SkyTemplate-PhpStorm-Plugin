@@ -1,6 +1,7 @@
 package com.novaframework.templatelang.sky
 
 import com.intellij.testFramework.fixtures.BasePlatformTestCase
+import com.novaframework.templatelang.settings.TemplateLangSettings
 
 /**
  * IDE-level integration check for [SkyTemplateEnterHandler]. Drives the
@@ -135,6 +136,32 @@ class SkyTemplateEnterHandlerIntegrationTest : BasePlatformTestCase() {
         )
     }
 
+    fun testTemplateParentLiftAlignsOpenerRelativeToLoop() {
+        // Opener typed at col 0 directly under a `{loop}` opener (also at
+        // col 0). The relative lift treats a template parent exactly like
+        // an HTML parent: the opener lifts to the parent's actual indent
+        // + one step (col 4), body to col 8, closer to col 4.
+        val result = typeEnter("a.sky", "{loop xs}\n{?cond}<caret>")
+        assertEquals(
+            "{loop xs}\n    {?cond}\n        \n    {/}",
+            result.trimEnd(),
+        )
+    }
+
+    fun testEnterIndentIsRelativeToNearestParentNotWholeFile() {
+        // Ancestors above the immediate parent are unindented (`<html>`,
+        // `<body>`, `<div>` all at col 0). The new body line indents ONE
+        // step under `{?cond}`'s actual indent — not the whole-file depth.
+        val result = typeEnter(
+            "a.html",
+            "<html>\n<body>\n<div>\n{?cond}\nbody1<caret>\n{/}\n</div>\n</body>\n</html>",
+        )
+        assertEquals(
+            "<html>\n<body>\n<div>\n{?cond}\nbody1\n    \n{/}\n</div>\n</body>\n</html>",
+            result.trimEnd(),
+        )
+    }
+
     fun testEnterInsideSkyBlockUsesSkyDepth() {
         // Issue 1: caret somewhere mid-body INSIDE a `{?cond}` block
         // in an HTML host. Without Sky awareness, the platform Enter
@@ -205,5 +232,32 @@ class SkyTemplateEnterHandlerIntegrationTest : BasePlatformTestCase() {
             "{?cond}\n        \n{/}",
             result.trimEnd(),
         )
+    }
+
+    fun testTrailingContentAfterOpenerMovesToBodyLine() {
+        // P-BUG-04: trailing content after the caret on the opener's line
+        // is the block's body, not decoration stuck after the auto-closed
+        // `{/}` — `{loop x}<caret>text` must become
+        // `{loop x}\n    text\n{/}`, not `{loop x}\n    \n{/}text`.
+        val result = typeEnter("a.sky", "{loop x}<caret>text")
+        assertEquals(
+            "{loop x}\n    text\n{/}",
+            result.trimEnd()
+        )
+    }
+
+    fun testDisabledSettingsSuppressesAutoClose() {
+        // P-BUG-01: preprocessEnter/postProcessEnter must honor the master
+        // enable switch, same as every other entry point gated by
+        // TemplateLangFileFilter. With the plugin disabled, Enter after an
+        // opener must not auto-close.
+        val settings = TemplateLangSettings.getInstance(project)
+        try {
+            settings.loadState(TemplateLangSettings.State().apply { enabled = false })
+            val result = typeEnter("a.sky", "{loop xs as x}<caret>")
+            assertEquals("{loop xs as x}\n", result)
+        } finally {
+            settings.loadState(TemplateLangSettings.State().apply { enabled = true })
+        }
     }
 }

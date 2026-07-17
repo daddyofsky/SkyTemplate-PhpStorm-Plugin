@@ -65,9 +65,13 @@ class SkyTemplateStatementMover : LineMover() {
         // Affected region: the union of the moved block and its swap target.
         // After the move the two have swapped, but the line index span they
         // occupy is unchanged, so re-indenting that span covers both.
-        val startLine = minOf(info.toMove.startLine, info.toMove2.startLine)
+        // toMove2 can be null when the platform has no swap target (e.g. the
+        // move is a no-op at a file boundary) — fall back to toMove so we
+        // still re-indent the moved block itself instead of NPEing.
+        val toMove2 = info.toMove2 ?: info.toMove
+        val startLine = minOf(info.toMove.startLine, toMove2.startLine)
             .coerceIn(0, document.lineCount - 1)
-        val endLineExclusive = maxOf(info.toMove.endLine, info.toMove2.endLine)
+        val endLineExclusive = maxOf(info.toMove.endLine, toMove2.endLine)
             .coerceIn(0, document.lineCount)
         if (endLineExclusive <= startLine) return
 
@@ -84,6 +88,7 @@ class SkyTemplateStatementMover : LineMover() {
                 indentStep = indentStep,
             ) { f, t, replacement ->
                 document.replaceString(f, t, replacement)
+                SkyTemplateRangeCache.invalidate()
             }
             PsiDocumentManager.getInstance(file.project).commitDocument(document)
         }

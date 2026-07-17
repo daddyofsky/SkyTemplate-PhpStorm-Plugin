@@ -122,6 +122,14 @@
         <copyPastePostProcessor
             implementation="com.novaframework.templatelang.sky.SkyTemplatePasteProcessor"/>
 
+        <!-- Smart indent: the platform's line-indent query (host Enter
+             auto-indent, Tab at line start, smart-indent actions) is
+             answered with the relative HTML+Sky depth — nearest enclosing
+             opener's actual indent + one step. Returns null outside Sky
+             context so plain HTML/XML falls back to the host formatter. -->
+        <lineIndentProvider
+            implementation="com.novaframework.templatelang.sky.SkyTemplateLineIndentProvider"/>
+
         <!-- Move Statement Up/Down: relocates lines via adjustLineIndent,
              which is also Sky-unaware. Extends LineMover and re-indents the
              moved region in afterMove. Engages only for files that contain

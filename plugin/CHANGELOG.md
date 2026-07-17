@@ -4,11 +4,92 @@ All notable changes to the **SkyTemplate** PhpStorm plugin are recorded in
 this file. The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to semantic versioning.
 
-## [1.2.0] — 2026-06-07
+## [1.2.2] — 2026-07-07
+
+Bug-fix and performance wave from the full-codebase audit recorded in
+`docs/BACKLOG.md` (items P-BUG-01…12, P-IMP-02/03/04/06/08). No new features.
+
+### Fixed
+
+- **Master switch honored on Enter and typed `}`** — the Enter handler and the
+  closing-tag aligner ran even with the plugin disabled in *Settings → Tools →
+  SkyTemplate*, and on file extensions outside the whitelist. Both entry
+  points are now gated by the same file filter as every other feature, so
+  disabling the plugin really stops auto-`{/}` insertion and indent rewriting.
+- **`{?:expr}` (elvis) indent classification** — the indent paths (Enter,
+  Reformat, `}` alignment, block actions, duplicate-suppression ranges)
+  treated the elvis tag as a non-block tag while folding and the unclosed-block
+  inspection treat it as a block opener. A `{?:…}…{/}` pair therefore popped
+  an *outer* frame during re-indent and shifted the rest of the file by one
+  level. All classifiers now agree that `{?:expr}` opens a block.
+- **`{/foo}` no longer pops a block on indent paths** — trailing text after
+  `/` disqualifies a closer for folding and inspections; the four indent
+  classifiers used a looser `first == '/'` rule and popped anyway, producing
+  indent drift that contradicted the inspection's "Unclosed block" report.
+  They now share folding's stricter closer pattern (`{/}` plus an optional
+  trailing `// comment` only).
+- **Reformat vs Enter depth mismatch on unbalanced closers** — the reformat
+  line walker popped the nearest opener (plain LIFO) while Enter smart-split,
+  the `}` aligner, and folding unwind by indent. On a "forgot to close the
+  inner block" file the two paths settled on different depths. The line
+  walker now unwinds indent-deeper unclosed openers first, matching the
+  other three.
+- **One-level over-indent for `}` lines in embedded script/style** — inside a
+  SkyTemplate-bearing `<script>` / `<style>`, a line whose first character is
+  `}` counted its own closing brace into the embedded brace depth, so Enter
+  and smart-indent pushed it one step too deep.
+- **Trailing content after an opener** — `{loop x}<caret>text` + Enter left
+  `text` after the auto-inserted `{/}`; it now moves onto the indented body
+  line.
+- **Stale range after verbatim script/style restore** — the post-format pass
+  captured the document length *after* the restore pass had already shrunk
+  the document, so a no-op re-indent could hand the platform a range whose
+  end lay beyond the document. The length is captured up front and the
+  returned range is clamped.
+- **Join gluing words together** — joining a block collapsed the line break
+  between two words to nothing (`hello` + `world` → `helloworld`). A newline
+  run bordered by word characters on both sides now collapses to a single
+  space; tag-adjacent joins stay tight as before.
+- **Tab width in indent comparisons** — indent-width comparisons counted a
+  tab as width 1, mis-judging "user indented deeper than baseline" in
+  tab-indented projects. A tab now weighs one indent step.
+- **Possible NPE in Move Statement Down** on the file's last physical line,
+  where the platform provides no swap target.
+
+### Changed
+
+- **Per-snapshot range caching** — template ranges, comment ranges, indent
+  ranges, protected embedded ranges, and block-pairing analysis are computed
+  once per document snapshot (keyed by text identity + length, invalidated on
+  self-edits) instead of 4–6 full-file rescans per Enter / typed char / Tab.
+  Purely internal; no behavior change. The `embeddedBraceDepth` scan also
+  dropped from O(region × ranges) to a two-pointer O(region + ranges), and
+  folding now reads the same char sequence as the structural annotator.
+
+## [1.2.1] — 2026-07-03
 
 Rolls up the work on top of 1.1.0: block-tag indent / Reformat groundwork,
 embedded `<script>` / `<style>` Reformat and Enter handling, branch-aware
 duplicate suppression, and the comment-handling and fixes below.
+
+### Compatibility
+
+- **No IDE upper bound** — the `until-build` cap (previously `261.*`) was
+  removed, so the plugin stays installable on PhpStorm 2026.2 (build 262) and
+  later branches. The compile / test baseline stays at 2024.2.
+
+### Changed
+
+- **Relative indentation** — Enter, Paste, Reformat Code, and the platform's
+  smart-indent / Tab paths now compute a line's indent **relative to the
+  nearest enclosing HTML or template opener's actual indent** (parent indent +
+  one step), instead of a depth re-derived from the top of the file. A block
+  nested under an unindented ancestor chain (`<html>` / `<body>` / `<div>` all
+  at column 0) no longer over-indents; each structural level — HTML or
+  template — adds exactly one step. A new `lineIndentProvider` extends the same
+  rule to the platform's smart-indent query, and the Enter opener-lift now
+  recognises a template parent (`{loop}`, `{?…}`, …) as an anchor on par with
+  an HTML parent.
 
 ### Fixed
 

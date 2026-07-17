@@ -513,7 +513,6 @@ object SkyTemplateRanges {
         val hasLeadingWs = i > bodyStart
         if (first == '/') return BlockKind.CLOSE
         if (first == ':') return BlockKind.BRANCH
-        if (first == '?' && i + 1 < bodyEnd && text[i + 1] == ':') return BlockKind.OTHER  // elvis
         if (first == '?') return BlockKind.OPEN_IF
         if (first == '@' || first == '%') return BlockKind.OPEN_LOOP
         if (hasLeadingWs) return BlockKind.OTHER

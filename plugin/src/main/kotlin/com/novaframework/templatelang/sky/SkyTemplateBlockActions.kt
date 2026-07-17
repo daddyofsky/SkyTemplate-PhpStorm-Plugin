@@ -385,9 +385,17 @@ object SkyTemplateBlockActionsLogic {
         if (i >= bodyEnd) return SplitKind.OTHER
         val first = text[i]
         val hasLeadingWs = i > bodyStart
-        if (first == '/') return SplitKind.CLOSE
+        if (first == '/') {
+            // `{/}` / `{/  }` — closer with optional trailing whitespace.
+            // `{/  // comment}` — closer + line comment. Anything else
+            // (`{/foo}`) is not a closer — mirrors FoldingBuilder's rule.
+            var j = i + 1
+            while (j < bodyEnd && (text[j] == ' ' || text[j] == '\t')) j++
+            if (j >= bodyEnd) return SplitKind.CLOSE
+            if (j + 1 < bodyEnd && text[j] == '/' && text[j + 1] == '/') return SplitKind.CLOSE
+            return SplitKind.OTHER
+        }
         if (first == ':') return SplitKind.BRANCH
-        if (first == '?' && i + 1 < bodyEnd && text[i + 1] == ':') return SplitKind.OTHER
         if (first == '?' || first == '@' || first == '%') return SplitKind.OPEN
         if (hasLeadingWs) return SplitKind.OTHER
         if (!(first.isLetter() || first == '_')) return SplitKind.OTHER
@@ -425,19 +433,42 @@ object SkyTemplateBlockActionsLogic {
     }
 
     /**
-     * Collapse the segment `[between]` for the Join transformation:
-     * trims leading / trailing whitespace AND replaces internal newline
-     * runs with empty string (to keep the line-collapse tight). Spaces
-     * within text content are preserved — we only kill structural
-     * whitespace, not author-meaningful spaces.
+     * Collapse the segment `[between]` for the Join transformation: trims
+     * leading / trailing whitespace, then resolves each internal newline
+     * run. A run bordered by word characters (`hello\nworld`) becomes a
+     * single space so the word boundary survives; a run bordered by tag
+     * punctuation (`>` / `{` / `}` / …) is removed entirely so the block
+     * stays tag-adjacent (`</li>\n{/}` → `</li>{/}`, not `</li> {/}`).
+     * Spaces within text content are otherwise preserved — we only
+     * resolve structural whitespace, not author-meaningful spaces.
      */
     private fun collapseWhitespace(between: String): String {
-        // Strip leading + trailing whitespace.
         val trimmed = between.trim()
         if (trimmed.isEmpty()) return ""
-        // Replace internal newline (with optional surrounding tabs /
-        // spaces) runs with a single space — preserves multi-line
-        // bodies that have meaningful word boundaries between lines.
-        return trimmed.replace(Regex("\\s*\n\\s*"), "")
+        val sb = StringBuilder()
+        var i = 0
+        while (i < trimmed.length) {
+            val c = trimmed[i]
+            if (c == '\n' || c == ' ' || c == '\t') {
+                val runStart = i
+                while (i < trimmed.length && (trimmed[i] == '\n' || trimmed[i] == ' ' || trimmed[i] == '\t')) i++
+                val hasNewline = trimmed.subSequence(runStart, i).contains('\n')
+                if (hasNewline) {
+                    val before = trimmed[runStart - 1]
+                    val after = trimmed[i]
+                    if (isWordChar(before) && isWordChar(after)) sb.append(' ')
+                } else {
+                    // Pure horizontal-whitespace run with no newline —
+                    // author-meaningful spacing, keep as-is.
+                    sb.append(trimmed, runStart, i)
+                }
+            } else {
+                sb.append(c)
+                i++
+            }
+        }
+        return sb.toString()
     }
+
+    private fun isWordChar(c: Char): Boolean = c.isLetterOrDigit() || c == '_'
 }

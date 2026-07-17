@@ -71,8 +71,8 @@ class SkyTemplateFoldingBuilder : FoldingBuilderEx(), DumbAware {
         }
         if (!accept) return emptyArray()
 
-        val text = file.text
-        if (text.isNullOrEmpty()) return emptyArray()
+        val text = viewProvider.contents
+        if (text.isEmpty()) return emptyArray()
         if ('{' !in text) return emptyArray()
 
         val regions = SkyTemplateFoldingScanner.scan(text)

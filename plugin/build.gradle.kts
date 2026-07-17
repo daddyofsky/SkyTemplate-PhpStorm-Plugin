@@ -6,7 +6,7 @@ plugins {
 }
 
 group = "com.novaframework"
-version = "1.2.0"
+version = "1.2.2"
 
 repositories {
     mavenCentral()
@@ -47,12 +47,26 @@ intellijPlatform {
     pluginConfiguration {
         ideaVersion {
             sinceBuild.set("242")
-            untilBuild.set("261.*")
+            // No upper bound — a null provider makes patchPluginXml omit the
+            // `until-build` attribute, so the plugin stays installable on
+            // future IDE branches (2026.2 / 262.* and later).
+            untilBuild.set(provider { null })
         }
         changeNotes.set(
             """
-            <h3>1.2.0</h3>
+            <h3>1.2.2</h3>
             <ul>
+              <li><b>Fixed</b> &mdash; The Enter handler and the closing-tag aligner now honor the plugin&rsquo;s master switch and file-extension whitelist &mdash; disabling the plugin really disables auto-<code>{/}</code> and indent rewriting.</li>
+              <li><b>Fixed</b> &mdash; Consistent block classification across Enter, Reformat, folding, and inspections: <code>{?:expr}</code> (elvis) opens a block everywhere, <code>{/foo}</code> (trailing text after <code>/</code>) is no longer treated as a closer by the indent paths, and Reformat&rsquo;s line walker unwinds an unbalanced <code>{/}</code> by indent the same way Enter and the aligner do &mdash; so &ldquo;forgot the inner close&rdquo; files settle to the same depth on every path.</li>
+              <li><b>Fixed</b> &mdash; Inside SkyTemplate-bearing <code>&lt;script&gt;</code> / <code>&lt;style&gt;</code>, a line starting with <code>}</code> no longer over-indents by one level on Enter / smart-indent.</li>
+              <li><b>Fixed</b> &mdash; Enter on <code>{loop x}&lt;caret&gt;text</code> moves <code>text</code> into the block body instead of stranding it after the auto-inserted <code>{/}</code>.</li>
+              <li><b>Fixed</b> &mdash; Join Lines keeps a single space between words across the joined line break (tag-adjacent joins stay tight); indent-width comparisons now weigh a tab as one indent step; a rare out-of-range result after Reformat of a shrunken <code>&lt;script&gt;</code> body; a possible exception in <i>Move Statement Down</i> on the file&rsquo;s last line.</li>
+              <li><b>Performance</b> &mdash; Template / comment / indent ranges and block-pairing analysis are now cached per document snapshot &mdash; typing, Enter, and Tab no longer rescan the whole file several times per keystroke.</li>
+            </ul>
+            <h3>1.2.1</h3>
+            <ul>
+              <li><b>Compatibility</b> &mdash; Removed the IDE upper-bound so the plugin stays installable on 2026.2 (build 262) and later branches.</li>
+              <li><b>Improved</b> &mdash; Indentation (Enter, Paste, Reformat, and smart-indent / Tab) is now computed <b>relative to the nearest enclosing HTML or template opener&rsquo;s actual indent</b>, instead of a depth re-derived from the whole file &mdash; so a block under an unindented ancestor chain no longer over-indents, and each level adds exactly one step. A new line-indent provider extends the same rule to the platform&rsquo;s smart-indent paths.</li>
               <li><b>Fixed</b> &mdash; False JS warnings on SkyTemplate tags inside <code>&lt;script&gt;</code>: <code>Unnecessary semicolon</code> and <code>Expression statement is not assignment or call</code>, raised by the embedded-JS parser on tokens next to a tag (e.g. the <code>;</code> after <code>{=expr};</code> or the bare branches in <code>{?var}true{:}false{/}</code>), are suppressed when a SkyTemplate tag shares the line.</li>
               <li><b>Fixed</b> &mdash; Reformat Code no longer mangles SkyTemplate-bearing <code>&lt;script&gt;</code> / <code>&lt;style&gt;</code>: the embedded JS / CSS formatter used to split <code>{=json_encode(data)}</code> across lines, push the <code>;</code> of <code>const a = {=foo};</code> onto its own line, break an inline <code>{?var}true{:}false{/}</code> over several lines, insert blank lines around block tags, and mis-indent. The whole body of any <code>&lt;script&gt;</code> / <code>&lt;style&gt;</code> that contains a SkyTemplate tag is now snapshotted before formatting and restored verbatim after, so it survives Reformat exactly as written. A script / style with no Sky tag (a genuine JS object literal, plain CSS) still formats normally.</li>
               <li><b>Fixed</b> &mdash; Enter indentation inside SkyTemplate-bearing <code>&lt;script&gt;</code> / <code>&lt;style&gt;</code>: the embedded JS / CSS Enter couldn&rsquo;t see <code>{?&hellip;}</code> / <code>{/}</code> block structure, so the new line missed the brace level after a JS <code>{</code>, stayed too deep after <code>{/}</code>, or lost the block indent on a blank line. The Enter handler now owns a plain Enter inside such a body and computes the combined HTML + SkyTemplate-block + host-brace indent itself. Scoped to script / style bodies that carry a SkyTemplate tag; everything else keeps the host Enter.</li>
