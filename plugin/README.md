@@ -1,17 +1,9 @@
-# SkyTemplate — PhpStorm Plugin
+# SkyTemplate — PhpStorm Plugin (development)
 
-PhpStorm support for the **SkyTemplate** PHP template engine (Nova Framework).
-The same code path also handles **Template_** (xtac.net) — both engines share
-the directive surface this plugin cares about, so existing Template_ projects
-work without extra configuration.
-
-Status: **stable** — released as 1.1.0. Editor support, PHP references &
-completion, structural & argument-validation inspections, named-args
-(paren + pipe), parameter-info popup, and inlay parameter hints are in
-place.
-
-See [CHANGELOG.md](CHANGELOG.md) for the per-release notes and
-[../PLAN.md](../PLAN.md) for the full roadmap.
+Build, test, and source-layout notes for plugin developers.
+For features, installation, and configuration see the
+[repository README](../README.md); per-release notes are in
+[CHANGELOG.md](CHANGELOG.md).
 
 ## Build
 
@@ -36,23 +28,21 @@ See [CHANGELOG.md](CHANGELOG.md) for the per-release notes and
 
 ```
 src/main/kotlin/com/novaframework/templatelang/
-  settings/                      # Project Settings → Tools → SkyTemplate
-    TemplateLangSettings.kt        # enabled flag + namespace / useClass / templateRoot / safeMode mirrors
-    TemplateLangConfigurable.kt
-  sky/                           # Lexer / parser / annotator / highlighting / brace matcher
-    SkyTemplateLanguage.kt
-    SkyTemplateFileType.kt        # *.sky / *.skyhtml
-    SkyTemplateLexer.kt
-    SkyTemplateAnnotator.kt       # *.html token overlay
-    SkyTemplateHtmlErrorFilter.kt # drop HTML/XML errors that overlap template tokens
-    SkyTemplateAttributeDescriptorsProvider.kt   # whitelist `tpl-*`
-    …
-  reference/                     # PhpIndex-backed PsiReferences + completion
-    SkyTemplateReferenceContributor.kt
-    SkyTemplateReferenceProvider.kt
-    SkyTemplatePhpReference.kt
-    SkyTemplateRefDetector.kt
-    SkyTemplateCompletionContributor.kt
+  common/       # Shared helpers
+  settings/     # Project Settings → Tools → SkyTemplate
+                #   enabled flag, namespace / useClass / formatter class,
+                #   file-extension whitelist
+  sky/          # Language core & editor behaviour — lexer, parser,
+                #   highlighting, annotator overlay for *.html hosts,
+                #   brace matching, folding, commenter, Enter / Tab / Paste /
+                #   Reformat indentation, pre/post-format processors,
+                #   live & file templates
+  reference/    # PhpIndex-backed PsiReferences, completion, Parameter Info,
+                #   inlay parameter hints, Find Usages / Go to Definition
+  inspection/   # Structural & argument-validation inspections
+                #   (unclosed block, orphan branch, loop scope, redundant @,
+                #   duplicate {else}, undefined symbol, argument count,
+                #   named args)
 ```
 
 ## Dev environment
