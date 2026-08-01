@@ -58,7 +58,7 @@ internal object SkyTemplateCompletionContext {
             val qualifier = extractQualifierEndingAt(body, dblColonIdx)
             if (!qualifier.isNullOrEmpty()) {
                 val beforeColon = body.substring(0, dblColonIdx)
-                val pipeBeforeColon = beforeColon.lastIndexOf('|') >= 0
+                val pipeBeforeColon = hasSinglePipe(beforeColon)
                 val cScope = body.length >= 2 && body[0] == 'c' && body[1] == '.'
                 return Result.ClassMember(
                     classNameInSource = qualifier,
@@ -69,13 +69,19 @@ internal object SkyTemplateCompletionContext {
         }
 
         // Pipe filter — `{var|here}` always offers functions with no parens
-        // (pipe form invokes without explicit parens).
-        if (body.lastIndexOf('|') >= 0) return Result.Function(withParens = false)
+        // (pipe form invokes without explicit parens). A `||` is the logical
+        // OR operator, not a pipe filter (`{?a || b}`).
+        if (hasSinglePipe(body)) return Result.Function(withParens = false)
 
         val first = body[0]
         return when {
             first == '=' || first == '?' || first == ';' -> Result.Function(withParens = true)
             first == ':' && (body.length == 1 || body[1] != ':') -> Result.Function(withParens = true)
+            // `@` / `%` loop-alias prefixes (`{@expr}` / `{%expr}`) are
+            // expression context too — the iterable can be `Cls::method()`
+            // etc. Mirrors SkyTemplateRefDetector's EXPRESSION_KEYWORDS/
+            // TAG_PREFIX handling for these two prefixes.
+            first == '@' || first == '%' -> Result.Function(withParens = true)
             first == 'c' && body.length >= 2 && body[1] == '.' -> Result.Constant
             first.isLetter() -> {
                 val firstWord = body.takeWhile { it.isLetterOrDigit() || it == '_' }
@@ -83,6 +89,34 @@ internal object SkyTemplateCompletionContext {
             }
             else -> null
         }
+    }
+
+    /**
+     * True when [body] contains a `|` that is NOT part of a `||` (logical
+     * OR) pair — i.e. a genuine pipe-filter separator. Quote-aware so a `|`
+     * inside a string literal value doesn't trigger a false positive.
+     */
+    private fun hasSinglePipe(body: String): Boolean {
+        var i = 0
+        var inQuote = ' '
+        while (i < body.length) {
+            val c = body[i]
+            if (inQuote != ' ') {
+                if (c == '\\' && i + 1 < body.length) { i += 2; continue }
+                if (c == inQuote) inQuote = ' '
+                i++
+                continue
+            }
+            when (c) {
+                '\'', '"' -> inQuote = c
+                '|' -> {
+                    if (i + 1 < body.length && body[i + 1] == '|') { i += 2; continue }
+                    return true
+                }
+            }
+            i++
+        }
+        return false
     }
 
     /** Last `::` offset, or -1. Returns the offset of the FIRST of the pair. */

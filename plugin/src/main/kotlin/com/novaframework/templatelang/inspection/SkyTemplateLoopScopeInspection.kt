@@ -40,7 +40,7 @@ class SkyTemplateLoopScopeInspection : LocalInspectionTool() {
         if (!TemplateLangFileFilter.shouldProcess(file)) return null
 
         val text = file.viewProvider.contents
-        val issues = SkyTemplateScopeAnalyzer.analyze(text)
+        val issues = SkyTemplateScopeAnalysisCache.get(text)
             .filter { it.code == Code.LOOP_DEPTH_TOO_DEEP || it.code == Code.RESERVED_OUTSIDE_LOOP }
         if (issues.isEmpty()) return null
 

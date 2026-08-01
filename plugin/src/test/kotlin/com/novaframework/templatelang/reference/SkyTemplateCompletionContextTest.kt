@@ -184,4 +184,39 @@ class SkyTemplateCompletionContextTest {
         val r = infer("{=Cls ::‸") as Result.ClassMember
         assertEquals("Cls", r.classNameInSource)
     }
+
+    // ── P3-9a: `||` logical OR must not be mistaken for a pipe filter ───────
+
+    @Test fun logicalOr_doesNotTriggerPipeCompletion() {
+        // `{?a || b}` — `||` is logical OR, not a pipe-filter separator.
+        // Before the fix, the false `|` sighting made this incorrectly
+        // return Function(withParens = FALSE) (pipe form); the `?` prefix
+        // means this is an expression body and must offer parens.
+        assertEquals(Result.Function(withParens = true), infer("{?a || ‸"))
+    }
+
+    @Test fun logicalOr_beforeCompletionPoint_stillOffersExpressionFunction() {
+        assertEquals(Result.Function(withParens = true), infer("{?a || b‸"))
+    }
+
+    @Test fun genuinePipeAfterLogicalOr_stillOffersPipeCompletion() {
+        // A real single `|` after a `||` must still be recognised.
+        assertEquals(Result.Function(withParens = false), infer("{var || cond|‸"))
+    }
+
+    @Test fun singlePipe_stillOffersPipeCompletion() {
+        // Sanity: a lone `|` (not `||`) is unaffected by the new guard.
+        assertEquals(Result.Function(withParens = false), infer("{var|‸"))
+    }
+
+    // ── P3-9b: `@` / `%` loop-alias prefixes are expression context ────────
+
+    @Test fun loopAliasAtPrefix_offersFunctionWithParens() {
+        assertEquals(Result.Function(withParens = true), infer("{@‸"))
+        assertEquals(Result.Function(withParens = true), infer("{@getList(‸"))
+    }
+
+    @Test fun loopAliasPercentPrefix_offersFunctionWithParens() {
+        assertEquals(Result.Function(withParens = true), infer("{%‸"))
+    }
 }

@@ -29,9 +29,10 @@
     <depends optional="true" config-file="css-support.xml">com.intellij.css</depends>
 
     <extensions defaultExtensionNs="com.intellij">
-        <!-- Project Settings → Tools → SkyTemplate -->
-        <projectService
-            serviceImplementation="com.novaframework.templatelang.settings.TemplateLangSettings"/>
+        <!-- Project Settings → Tools → SkyTemplate. TemplateLangSettings is
+             a light service (`@Service(Service.Level.PROJECT)` on the class
+             itself) — no XML `<projectService>` registration needed; adding
+             one here would double-register the same service. -->
         <projectConfigurable
             parentId="tools"
             instance="com.novaframework.templatelang.settings.TemplateLangConfigurable"
@@ -67,10 +68,9 @@
 
         <!-- Code folding for `{loop}/{if}/{foreach}/…/{/}` block tags and
              multi-line `{*…*}` comments. Registered for SkyTemplate (covers
-             `*.sky`) and for HTML / XML (covers `*.html` /
-             `*.htm` / `*.xml` host files where SkyTemplate constructs are
-             embedded as plain text). The builder de-duplicates against the
-             multi-tree case internally. -->
+             `*.sky`) and for HTML (covers `*.html` / `*.htm` host files
+             where SkyTemplate constructs are embedded as plain text). The
+             builder de-duplicates against the multi-tree case internally. -->
         <lang.foldingBuilder
             language="SkyTemplate"
             implementationClass="com.novaframework.templatelang.sky.SkyTemplateFoldingBuilder"/>
@@ -259,15 +259,18 @@
             implementationClass="com.novaframework.templatelang.sky.SkyTemplateFindUsagesProvider"/>
 
         <!-- M7 Inspections — structural diagnostics for SkyTemplate
-             directives. Registered against SkyTemplate, HTML, and XML so
-             the inspection runs in `*.sky` files AND in
-             plain HTML / XML host files where SkyTemplate constructs are
-             embedded. The inspection's isApplicable() dedupes multi-tree
-             files so each unpaired open is reported once. The pairing
-             logic is shared with SkyTemplateFoldingScanner so fold
-             rendering and inspection findings stay consistent. Both
-             inspections honour the master `Enable SkyTemplate support`
-             toggle in Project Settings → Tools → SkyTemplate. -->
+             directives. Registered ONLY for the SkyTemplate language, so
+             these two run in `*.sky` files. The platform's per-language
+             inspection pipeline never dispatches a LocalInspectionTool to
+             HTML / XML host files even when registered with
+             `language="HTML"` (confirmed empirically), so HTML / XML host
+             coverage for the same diagnostics is provided separately below
+             by SkyTemplateStructuralAnnotator (an Annotator, not a
+             LocalInspectionTool). The pairing logic is shared with
+             SkyTemplateFoldingScanner so fold rendering and inspection
+             findings stay consistent. Both inspections honour the master
+             `Enable SkyTemplate support` toggle in Project Settings →
+             Tools → SkyTemplate. -->
         <localInspection
             language="SkyTemplate"
             shortName="SkyTemplateUnclosedBlock"

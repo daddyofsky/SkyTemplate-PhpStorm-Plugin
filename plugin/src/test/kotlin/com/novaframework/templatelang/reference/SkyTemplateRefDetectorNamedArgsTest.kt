@@ -299,4 +299,36 @@ class SkyTemplateRefDetectorNamedArgsTest {
         assertEquals("expected only `mode`, got $params",
             listOf("mode"), params.map { it.nameInSource })
     }
+
+    // ── P3-7: scanPipeFilterArgs depth tracking ─────────────────────────────
+
+    /**
+     * `{x|fmt=foo(a=1)}` — `a=1` is a named arg of the NESTED call `foo(...)`,
+     * not of the outer pipe filter `fmt`. Before depth-tracking, the scanner
+     * saw `a` immediately followed by `=` regardless of the enclosing `(`
+     * and misreported it as a PARAMETER_NAME of `fmt`.
+     */
+    @Test fun pipeFilter_namedArgInsideNestedCallArgs_notMisreadAsFilterParam() {
+        val refs = detect("{\$x|fmt=foo(a=1)}")
+        val params = refs.filter { it.kind == Kind.PARAMETER_NAME }
+        assertTrue("`a=1` belongs to nested `foo(...)`, not `fmt`; got $params",
+            params.isEmpty())
+    }
+
+    /** A genuine top-level named arg AFTER a nested-call bucket must still surface. */
+    @Test fun pipeFilter_namedArgAfterNestedCallBucket_stillDetected() {
+        val refs = detect("{\$x|fmt=foo(a=1), label=hi}")
+        val params = refs.filter { it.kind == Kind.PARAMETER_NAME }
+        assertEquals("expected only the top-level `label`, got $params",
+            listOf("label"), params.map { it.nameInSource })
+        assertEquals("fmt", params[0].callTargetName)
+    }
+
+    /** Bracket nesting must also gate depth (array-literal value). */
+    @Test fun pipeFilter_bracketNesting_doesNotLeakInnerAssignmentAsNamedArg() {
+        val refs = detect("{\$x|fmt=[a=1, b=2]}")
+        val params = refs.filter { it.kind == Kind.PARAMETER_NAME }
+        assertTrue("bucket inside `[...]` must not surface a PARAMETER_NAME, got $params",
+            params.isEmpty())
+    }
 }

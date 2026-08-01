@@ -106,6 +106,28 @@ class SkyTemplatePhpImplicitUsageProviderTest : BasePlatformTestCase() {
         )
     }
 
+    // ── P3-10b: PHP function names resolve case-insensitively ──────────────
+
+    fun testFunctionUsedWithDifferentCaseInTemplateMarkedImplicit() {
+        // PHP function names are case-insensitive — `{=MyCaseFn()}` must
+        // count as usage of `function mycasefn()`.
+        myFixture.addFileToProject(
+            "defs.php",
+            """
+            <?php
+            function mycasefn(): void {}
+            """.trimIndent()
+        )
+        myFixture.addFileToProject("page.html", "<p>{=MyCaseFn()}</p>")
+        IndexingTestUtil.waitUntilIndexesAreReady(project)
+
+        val fn = phpFunction("mycasefn") ?: error("mycasefn not in PhpIndex")
+        assertTrue(
+            "differently-cased call in template must still mark the function implicit-used",
+            SkyTemplatePhpImplicitUsageProvider().isImplicitUsage(fn),
+        )
+    }
+
     fun testPluginDisabledNotImplicit() {
         myFixture.addFileToProject(
             "defs.php",

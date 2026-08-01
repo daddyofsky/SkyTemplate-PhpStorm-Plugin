@@ -75,7 +75,13 @@ class SkyTemplateFoldingBuilder : FoldingBuilderEx(), DumbAware {
         if (text.isEmpty()) return emptyArray()
         if ('{' !in text) return emptyArray()
 
-        val regions = SkyTemplateFoldingScanner.scan(text)
+        // Routed through SkyTemplateRangeCache (identity-keyed on this
+        // viewProvider.contents instance) instead of calling
+        // SkyTemplateFoldingScanner.scan(text) directly, so a folding pass
+        // that follows (or precedes) an inspection / annotator pass over the
+        // same document reuses that pass's block-pairing result instead of
+        // re-lexing the whole file.
+        val regions = SkyTemplateRangeCache.getBlockPairing(text).foldRegions
         if (regions.isEmpty()) return emptyArray()
 
         val node = root.node ?: file.node ?: return emptyArray()
@@ -165,22 +171,51 @@ object SkyTemplateFoldingScanner {
         if (text.isEmpty() || '{' !in text) {
             return BlockPairingResult(emptyList(), emptyList(), emptyList())
         }
-        val (regions, unpaired, orphans) = scanInternal(text)
+        val phpRanges = SkyTemplateRanges.computePhpRanges(text)
+        val commentRanges = SkyTemplateRanges.computeCommentRanges(text, phpRanges)
+        val wrappedMatches = SkyTemplateRanges.computeWrappedMatches(text)
+        val templateRanges = SkyTemplateRanges.computeTemplateRanges(text, commentRanges, phpRanges, wrappedMatches)
+        val (regions, unpaired, orphans) = scanInternal(text, commentRanges, wrappedMatches, templateRanges)
         return BlockPairingResult(regions, unpaired, orphans)
     }
 
     /**
-     * Single-pass walker. Returns fold regions + diagnostics. Internal so the
-     * `scan()` shortcut can keep its old signature for callers (the folding
-     * builder).
+     * Overload for callers that already hold [commentRanges] / [templateRanges]
+     * from a shared per-document computation (e.g. [SkyTemplateRangeCache]'s
+     * entry, which computes both as part of its own lazy fields) — skips
+     * recomputing them so the whole-file comment-lex / PHP-region /
+     * brace-pairing scans run once per document instead of once per
+     * consumer. [SkyTemplateRanges.computeWrappedMatches] is still run once
+     * here since it isn't part of the shared entry.
+     */
+    internal fun analyze(
+        text: CharSequence,
+        commentRanges: List<TextRange>,
+        templateRanges: List<TextRange>,
+    ): BlockPairingResult {
+        if (text.isEmpty() || '{' !in text) {
+            return BlockPairingResult(emptyList(), emptyList(), emptyList())
+        }
+        val wrappedMatches = SkyTemplateRanges.computeWrappedMatches(text)
+        val (regions, unpaired, orphans) = scanInternal(text, commentRanges, wrappedMatches, templateRanges)
+        return BlockPairingResult(regions, unpaired, orphans)
+    }
+
+    /**
+     * Single-pass walker. Returns fold regions + diagnostics. Takes the
+     * intermediate scans as parameters (rather than recomputing them) so
+     * both [analyze] overloads share this one assembly step.
      */
     private fun scanInternal(
         text: CharSequence,
+        commentRanges: List<TextRange>,
+        wrappedMatches: List<TextRange>,
+        templateRanges: List<TextRange>,
     ): Triple<List<FoldRegion>, List<UnpairedOpen>, List<OrphanBranch>> {
         val regions = ArrayList<FoldRegion>()
 
         // 1. Multi-line `{*…*}` comments and wrapped `<!--{*…*}-->` forms.
-        for (range in SkyTemplateRanges.computeCommentRanges(text)) {
+        for (range in commentRanges) {
             if (spansMultipleLines(text, range)) {
                 val placeholder = if (looksWrapped(text, range)) "<!--{*…*}-->" else "{*…*}"
                 regions += FoldRegion(range, placeholder)
@@ -194,19 +229,21 @@ object SkyTemplateFoldingScanner {
         //    spans of a SINGLE wrapper still benefit from a fold (e.g. a
         //    `<!--{ very long expression }-->` literal that wraps lines),
         //    so we add those as standalone folds.
-        val wrappedRanges = computeWrappedRanges(text)
-        for (range in wrappedRanges) {
+        for (range in wrappedMatches) {
             if (!spansMultipleLines(text, range)) continue
-            // Skip if it's actually a comment (already handled above).
-            if (isCommentWrapper(text, range)) continue
+            // A match overlapping a comment is either the comment itself
+            // (already folded above), a directive inside `{*…*}` (inert), or
+            // the lazy regex mis-stopping at an inner `}-->` of a wrapped
+            // comment — skip all three.
+            if (SkyTemplateRanges.anyOverlap(commentRanges, range.startOffset, range.endOffset)) continue
             regions += FoldRegion(range, "<!--{…}-->")
         }
 
-        // 3. Block tags: scan via the SkyTemplate lexer and pair openers
-        //    with closers using a depth stack. The same pass produces
+        // 3. Block tags: pair openers with closers using a depth stack over
+        //    the already-computed [templateRanges]. The same pass produces
         //    diagnostics — leftover open tags (`unpaired`) and branch tags
         //    that appeared outside any open block (`orphans`).
-        val (blockRegions, unpaired, orphans) = scanBlockTagsWithDiagnostics(text)
+        val (blockRegions, unpaired, orphans) = scanBlockTagsWithDiagnostics(text, templateRanges)
         regions += blockRegions
 
         // Order by start so the platform receives them sensibly (the API
@@ -241,12 +278,12 @@ object SkyTemplateFoldingScanner {
 
     private fun scanBlockTagsWithDiagnostics(
         text: CharSequence,
+        pairs: List<TextRange>,
     ): Triple<List<FoldRegion>, List<UnpairedOpen>, List<OrphanBranch>> {
-        // Locate every `{ … }` pair that looks like a template tag (this
+        // [pairs] is every `{ … }` span that looks like a template tag (this
         // already includes wrapped `<!--{ … }-->` ranges from
         // computeTemplateRanges, so wrapped openers / closers participate
         // in pairing alongside their plain counterparts).
-        val pairs = SkyTemplateRanges.computeTemplateRanges(text)
         if (pairs.isEmpty()) return Triple(emptyList(), emptyList(), emptyList())
 
         val openStack = ArrayDeque<StackEntry>()
@@ -412,7 +449,7 @@ object SkyTemplateFoldingScanner {
         openOffset: Int,
         closeEndOffset: Int,
     ): String {
-        val (innerOpen, innerCloseEnd) = innerBraceBounds(text, openOffset, closeEndOffset)
+        val (innerOpen, innerCloseEnd) = SkyTemplateRanges.innerBraceBounds(text, openOffset, closeEndOffset)
             ?: return "else"
         var i = innerOpen + 1
         val end = innerCloseEnd - 1
@@ -433,45 +470,8 @@ object SkyTemplateFoldingScanner {
     /** Classification of a single `{ … }` span. */
     private enum class TagKind { BLOCK_OPEN, BLOCK_CLOSE, BRANCH, OTHER }
 
-    /**
-     * Locate the inner `{ … }` brace bounds within a (possibly wrapped) tag
-     * range. For plain `{ … }` the result equals the input; for the wrapped
-     * `<!--{ … }-->` form the bounds skip the `<!--…-->` shell so the
-     * classifier can read the directive body.
-     *
-     * Returns `(innerOpen, innerCloseEnd)` — `innerOpen` is the offset of `{`
-     * and `innerCloseEnd` is one past the matching `}`. Returns null if the
-     * range doesn't contain a recognisable brace pair.
-     */
-    private fun innerBraceBounds(
-        text: CharSequence,
-        openOffset: Int,
-        closeEndOffset: Int,
-    ): Pair<Int, Int>? {
-        if (openOffset >= closeEndOffset) return null
-        if (text[openOffset] == '{') {
-            return openOffset to closeEndOffset
-        }
-        // Wrapped form `<!--+{ … }--+>` — search inside the wrapper for the
-        // first `{` and the last `}`. SkyTemplate's compiler permits any
-        // number of leading / trailing dashes (≥2), so we don't pin to a
-        // fixed shell length.
-        if (text[openOffset] == '<' && openOffset + 4 <= closeEndOffset) {
-            var open = -1
-            for (i in openOffset until closeEndOffset) {
-                if (text[i] == '{') { open = i; break }
-            }
-            var close = -1
-            for (i in closeEndOffset - 1 downTo openOffset) {
-                if (text[i] == '}') { close = i; break }
-            }
-            if (open >= 0 && close > open) return open to (close + 1)
-        }
-        return null
-    }
-
     private fun classify(text: CharSequence, openOffset: Int, closeEndOffset: Int): TagKind {
-        val (innerOpen, innerCloseEnd) = innerBraceBounds(text, openOffset, closeEndOffset)
+        val (innerOpen, innerCloseEnd) = SkyTemplateRanges.innerBraceBounds(text, openOffset, closeEndOffset)
             ?: return TagKind.OTHER
         val bodyStart = innerOpen + 1
         val bodyEnd = innerCloseEnd - 1
@@ -582,18 +582,6 @@ object SkyTemplateFoldingScanner {
             text[start + 2] == '-' && text[start + 3] == '-'
     }
 
-    private fun computeWrappedRanges(text: CharSequence): List<TextRange> {
-        return WRAPPED_DIRECTIVE.findAll(text)
-            .map { TextRange(it.range.first, it.range.last + 1) }
-            .toList()
-    }
-
-    private fun isCommentWrapper(text: CharSequence, range: TextRange): Boolean {
-        val s = text.subSequence(range.startOffset, range.endOffset).toString()
-        return s.contains("{*") && s.contains("*}")
-    }
-
-    private val WRAPPED_DIRECTIVE = Regex("""<!--+\{[\s\S]*?\}--+>""")
     private val WHITESPACE_RUN = Regex("""\s+""")
     private const val MAX_HEADER = 60
 }

@@ -263,11 +263,21 @@ object SkyTemplatePostFormatLogic {
      * replacement)`; edits are dispatched in DESCENDING start order so
      * the caller can apply them straight to a mutable document without
      * tracking shifted offsets. Returns the (possibly grown) range.
+     *
+     * [exactLines] (1-based, inclusive) opts specific lines out of the
+     * default one-sided (lift-only) policy for OPEN / BODY / VOID kinds —
+     * their indent is set to exactly the computed depth even when that
+     * means shrinking it. Used by [SkyTemplateStatementMover]: a line the
+     * user moved across a block boundary can land deeper than it should
+     * (e.g. former block-body indent surviving a move to outside the
+     * block), and lift-only can never correct that. Every other caller
+     * passes `null` and keeps the original lift-only behaviour untouched.
      */
     fun reindent(
         text: CharSequence,
         range: TextRange,
         indentStep: String,
+        exactLines: IntRange? = null,
         applyEdit: (start: Int, end: Int, replacement: String) -> Unit,
     ): TextRange {
         if (text.isEmpty() || indentStep.isEmpty()) return range
@@ -358,6 +368,7 @@ object SkyTemplatePostFormatLogic {
             }
 
             val inWindow = line >= firstLine
+            val exact = exactLines != null && line in exactLines
             val parent = stack.lastOrNull()
             val parentEffective = parent?.effective
             val parentChildStep = parent?.childStep ?: ""
@@ -372,7 +383,7 @@ object SkyTemplatePostFormatLogic {
             val desired: String? = when (info.kind) {
                 LineKind.SKY_OPEN, LineKind.HTML_OPEN -> {
                     val baseline = if (parentEffective != null) parentEffective + parentChildStep else ""
-                    if (visualWidth(baseline, indentStep) > visualWidth(rawIndent, indentStep)) baseline else rawIndent
+                    if (exact || visualWidth(baseline, indentStep) > visualWidth(rawIndent, indentStep)) baseline else rawIndent
                 }
                 LineKind.SKY_CLOSE, LineKind.HTML_CLOSE -> parentEffective
                 LineKind.SKY_BRANCH -> parentEffective
@@ -393,8 +404,13 @@ object SkyTemplatePostFormatLogic {
             //     a deeper user-typed indent expresses intent (visual
             //     emphasis, host formatter's nested HTML rules, …) and
             //     overriding it would be more hostile than helpful.
+            //   - [exactLines] opts a specific line (the statement mover's
+            //     landing spot) OUT of that lift-only carve-out: it did not
+            //     choose its current indent, a swap with a structural line
+            //     left it there, so it is treated TWO-SIDED like a closer.
             if (inWindow && desired != null) {
-                val twoSided = info.kind == LineKind.SKY_CLOSE ||
+                val twoSided = exact ||
+                    info.kind == LineKind.SKY_CLOSE ||
                     info.kind == LineKind.HTML_CLOSE ||
                     info.kind == LineKind.SKY_BRANCH
                 val mustEdit = if (twoSided) {
@@ -662,8 +678,10 @@ object SkyTemplatePostFormatLogic {
     private enum class Kind { OPEN, CLOSE, BRANCH, OTHER }
 
     private fun classifyKind(text: CharSequence, openOffset: Int, closeEndOffset: Int): Kind {
-        val bodyStart = openOffset + 1
-        val bodyEnd = closeEndOffset - 1
+        val (innerOpen, innerCloseEnd) = SkyTemplateRanges.innerBraceBounds(text, openOffset, closeEndOffset)
+            ?: return Kind.OTHER
+        val bodyStart = innerOpen + 1
+        val bodyEnd = innerCloseEnd - 1
         if (bodyEnd <= bodyStart) return Kind.OTHER
 
         var i = bodyStart

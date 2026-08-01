@@ -40,7 +40,7 @@ class SkyTemplateRedundantAtInspection : LocalInspectionTool() {
         if (!TemplateLangFileFilter.shouldProcess(file)) return null
 
         val text = file.viewProvider.contents
-        val issues = SkyTemplateScopeAnalyzer.analyze(text)
+        val issues = SkyTemplateScopeAnalysisCache.get(text)
             .filter { it.code == Code.REDUNDANT_AT_ON_NON_LOOP || it.code == Code.REDUNDANT_AT_ZERO }
         if (issues.isEmpty()) return null
 

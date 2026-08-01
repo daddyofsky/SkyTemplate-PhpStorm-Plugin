@@ -42,28 +42,51 @@ object SkyTemplateRanges {
      */
     fun computeTemplateRanges(text: CharSequence): List<TextRange> {
         if (text.isEmpty() || '{' !in text) return emptyList()
+        val phpRanges = computePhpRanges(text)
+        val commentRanges = computeCommentRanges(text, phpRanges)
+        return computeTemplateRanges(text, commentRanges, phpRanges)
+    }
+
+    /**
+     * Overload accepting a precomputed [commentRanges] / [phpRanges] (and
+     * optionally [wrappedMatches]) so callers that already hold them from a
+     * shared per-document computation — [SkyTemplateRangeCache]'s entry,
+     * [SkyTemplateFoldingScanner]'s scan — don't force a second full-text
+     * comment-lex / PHP-region scan / wrapped-directive regex pass for the
+     * same input. See [computeTemplateRanges] (1-arg) for the full algorithm
+     * description; this is the same body parameterised over the
+     * intermediate results.
+     */
+    internal fun computeTemplateRanges(
+        text: CharSequence,
+        commentRanges: List<TextRange>,
+        phpRanges: List<TextRange>,
+        wrappedMatches: List<TextRange> = computeWrappedMatches(text),
+    ): List<TextRange> {
+        if (text.isEmpty() || '{' !in text) return emptyList()
         val ranges = ArrayList<TextRange>()
 
-        // 1. HTML-wrapped directives
-        val wrapped = WRAPPED_DIRECTIVE.findAll(text)
-            .map { TextRange(it.range.first, it.range.last + 1) }
-            .toList()
+        // 1. `{* … *}` comment ranges — must take precedence over BOTH the
+        //    wrapped-directive scan and plain `{…}` so anything inside a
+        //    comment body stays inert.
+        ranges += commentRanges
+
+        // 2. PHP code regions `<?php … ?>` / `<?= … ?>` / `<? … ?>` are
+        //    excluded from SkyTemplate scanning (see [computePhpRanges]'s
+        //    KDoc for why) — computed by the caller and passed in as
+        //    [phpRanges].
+
+        // 3. HTML-wrapped directives. A match overlapping a comment or a PHP
+        //    region is dropped: either it sits INSIDE `{* … *}` (a wrapped
+        //    `<!--{/}-->` in a comment body must not pop live pairing
+        //    frames), it is the lazy regex mis-stopping at an inner `}-->`
+        //    of a wrapped comment (`<!--{* … <!--{? x}--> … *}-->`) whose
+        //    real span the comment range already covers, or its `<!--{…}-->`
+        //    shape only exists inside a PHP string literal.
+        val wrapped = wrappedMatches
+            .filter { !anyOverlap(commentRanges, it.startOffset, it.endOffset) }
+            .filter { !anyOverlap(phpRanges, it.startOffset, it.endOffset) }
         ranges += wrapped
-
-        // 2. `{* … *}` comment ranges — must take precedence over plain `{…}`
-        //    so nested `{` characters inside a comment body don't get scanned.
-        val commentRanges = computeCommentRanges(text)
-        for (r in commentRanges) {
-            if (!isInside(r, wrapped)) ranges += r
-        }
-
-        // 3. PHP code regions `<?php … ?>` / `<?= … ?>` / `<? … ?>`. Their
-        //    bodies (including any string literals inside) are NOT SkyTemplate
-        //    territory — without this exclusion, a PHP string literal like
-        //    `'<?php if (%s) { ?>'` has its `{ ?` mis-detected as a `{?…}`
-        //    directive (the `?` passes the tag-prefix-char check and the
-        //    bogus brace pair is formed against some later `}`).
-        val phpRanges = computePhpRanges(text)
 
         // 4. Plain `{ … }` brace pairs with depth tracking. CSS / JS often nests
         //    braces (`@media { .foo { color: red; } }`, JS arrow blocks, etc.),
@@ -84,6 +107,17 @@ object SkyTemplateRanges {
         ranges.sortBy { it.startOffset }
         return ranges
     }
+
+    /**
+     * Raw `<!--+{ … }--+>` regex matches, unfiltered. Shared by
+     * [computeTemplateRanges] and [SkyTemplateFoldingScanner] so the
+     * whole-text regex scan runs once per top-level call instead of once
+     * per consumer.
+     */
+    internal fun computeWrappedMatches(text: CharSequence): List<TextRange> =
+        WRAPPED_DIRECTIVE.findAll(text)
+            .map { TextRange(it.range.first, it.range.last + 1) }
+            .toList()
 
     /** `<script>` / `<style>` — embedded JS / CSS, owned by a real formatter. */
     private val EMBEDDED_CODE_TAGS = setOf("script", "style")
@@ -317,57 +351,85 @@ object SkyTemplateRanges {
 
     /**
      * Comment-only ranges. The lexer state (OUTER ↔ IN_COMMENT) tracks
-     * `{* … *}` correctly across the entire file, so multi-line and
-     * multi-element comments fall out for free.
+     * `{* … *}` correctly across the entire file (nesting included), so
+     * multi-line and multi-element comments fall out for free.
      *
-     * Wrapped form `<!--{*…*}-->` is added on top so its outer `<!--` and
-     * `-->` markers get the comment colour too.
+     * Each balanced comment is then extended over a DIRECTLY adjacent HTML
+     * shell so the wrapped form `<!--{*…*}-->` covers its outer `<!--` and
+     * `-->` markers too. Detecting the shell from the lexer range outward —
+     * instead of regex-matching `<!--{…}-->` and filtering — keeps a comment
+     * whose body contains wrapped directives (`<!--{? x}-->` … `<!--{/}-->`)
+     * in ONE range: the lazy [WRAPPED_DIRECTIVE] used to stop at the inner
+     * `}-->`, splitting the comment and leaving its `*}-->` tail uncovered.
+     *
+     * Policy: comments win over PHP. A comment is only discarded when its
+     * OWN `{*` open sits inside a PHP region (a `{* … *}`-shaped sequence
+     * inside a PHP string literal is not a SkyTemplate comment at all). A
+     * genuine comment that merely *contains* a PHP fragment in its body
+     * (`{* {loop x} <?=$y?> old *}`) stays a comment — discarding it on
+     * overlap alone would un-neutralise the `{loop x}` inside, making it
+     * live again.
      */
     fun computeCommentRanges(text: CharSequence): List<TextRange> {
-        if (text.isEmpty()) return emptyList()
-        val ranges = ArrayList<TextRange>()
+        if (text.isEmpty() || "{*" !in text) return emptyList()
+        return computeCommentRanges(text, computePhpRanges(text))
+    }
 
-        // 1. Wrapped form, restricted to actual comment payloads `{* … *}`.
-        val wrapped = WRAPPED_DIRECTIVE.findAll(text)
-            .filter { it.value.contains("{*") && it.value.contains("*}") }
-            .map { TextRange(it.range.first, it.range.last + 1) }
-            .toList()
-        ranges += wrapped
+    /**
+     * Overload accepting a precomputed [phpRanges] so callers that already
+     * have it (e.g. [computeTemplateRanges], [SkyTemplateFoldingScanner])
+     * don't force a second full-text PHP-region scan for the same input.
+     */
+    internal fun computeCommentRanges(text: CharSequence, phpRanges: List<TextRange>): List<TextRange> {
+        if (text.isEmpty() || "{*" !in text) return emptyList()
+        val ranges = ArrayList<TextRange>()
 
         // PHP regions own their text — a `{* … *}` sequence inside a PHP
         // string literal is NOT a SkyTemplate comment.
-        val phpRanges = computePhpRanges(text)
 
-        // 2. Plain `{* … *}`.
-        if ("{*" in text) {
-            val lexer = SkyTemplateLexer()
-            lexer.start(text, 0, text.length, 0)
-            var commentStart = -1
-            while (lexer.tokenType != null) {
-                when (lexer.tokenType) {
-                    T.COMMENT_OPEN -> if (commentStart < 0) commentStart = lexer.tokenStart
-                    T.COMMENT_CLOSE -> if (commentStart >= 0) {
-                        val r = TextRange(commentStart, lexer.tokenEnd)
-                        if (!isInside(r, wrapped) &&
-                            !anyOverlap(phpRanges, r.startOffset, r.endOffset)
-                        ) ranges += r
-                        commentStart = -1
-                    }
-                    else -> Unit
+        val lexer = SkyTemplateLexer()
+        lexer.start(text, 0, text.length, 0)
+        var commentStart = -1
+        while (lexer.tokenType != null) {
+            when (lexer.tokenType) {
+                T.COMMENT_OPEN -> if (commentStart < 0) commentStart = lexer.tokenStart
+                T.COMMENT_CLOSE -> if (commentStart >= 0) {
+                    val r = extendOverHtmlShell(text, commentStart, lexer.tokenEnd)
+                    if (!anyContainsOffset(phpRanges, commentStart)) ranges += r
+                    commentStart = -1
                 }
-                lexer.advance()
+                else -> Unit
             }
-            // unterminated `{* …` — emit best-effort range so the HTML noise inside still gets suppressed.
-            if (commentStart >= 0) {
-                val r = TextRange(commentStart, text.length)
-                if (!isInside(r, wrapped) &&
-                    !anyOverlap(phpRanges, r.startOffset, r.endOffset)
-                ) ranges += r
-            }
+            lexer.advance()
+        }
+        // unterminated `{* …` — emit best-effort range so the HTML noise inside still gets suppressed.
+        if (commentStart >= 0) {
+            val r = TextRange(commentStart, text.length)
+            if (!anyContainsOffset(phpRanges, commentStart)) ranges += r
         }
 
         ranges.sortBy { it.startOffset }
         return ranges
+    }
+
+    /**
+     * Extend a balanced `{* … *}` comment over a directly adjacent HTML
+     * wrapper: `<!--+` immediately before the `{*` and `--+>` immediately
+     * after the `*}` (dash count ≥ 2, matching [WRAPPED_DIRECTIVE]). Both
+     * sides must be present — `<!-- {* … *} -->` (whitespace between) stays
+     * a plain comment so the HTML markers keep their HTML colour.
+     */
+    private fun extendOverHtmlShell(text: CharSequence, start: Int, end: Int): TextRange {
+        var s = start
+        while (s > 0 && text[s - 1] == '-') s--
+        val hasPrefix = start - s >= 2 && s >= 2 && text[s - 2] == '<' && text[s - 1] == '!'
+
+        var e = end
+        val n = text.length
+        while (e < n && text[e] == '-') e++
+        val hasSuffix = e - end >= 2 && e < n && text[e] == '>'
+
+        return if (hasPrefix && hasSuffix) TextRange(s - 2, e + 1) else TextRange(start, end)
     }
 
     /**
@@ -392,10 +454,48 @@ object SkyTemplateRanges {
         if (comments.isEmpty()) return base
         val result = ArrayList(base)
         for (c in comments) {
-            collectCommentInnerTagPairs(text, c.startOffset + 2, c.endOffset - 2, result)
+            val bounds = commentBodyBounds(text, c) ?: continue
+            collectCommentInnerTagPairs(text, bounds.first, bounds.second, result)
         }
         result.sortBy { it.startOffset }
         return result
+    }
+
+    /**
+     * `{* … *}` body bounds of a comment range, for [computeIndentRanges].
+     *
+     * A plain comment range starts at `{*` — the body is just the range
+     * minus the 2-char markers on each side. An HTML-wrapped comment
+     * (`<!--+{* … *}--+>`, see [extendOverHtmlShell]) starts at `<!--`
+     * instead, so the real `{*` / `*}` markers sit further in; scanning for
+     * the first `{*` and the last `*}` finds them regardless of dash count
+     * (mirrors [SkyTemplateFoldingScanner]'s `innerBraceBounds`). Without
+     * this distinction, treating the wrapped range's `<!--` as if it were
+     * `{*` shifts the body window into the shell itself and the "skip
+     * nested comment" scan in [collectCommentInnerTagPairs] then swallows
+     * the comment's real body whole, dropping every tag inside it.
+     */
+    private fun commentBodyBounds(text: CharSequence, c: TextRange): Pair<Int, Int>? {
+        if (c.endOffset - c.startOffset < 4) return null
+        if (text[c.startOffset] == '{') {
+            return (c.startOffset + 2) to (c.endOffset - 2)
+        }
+        if (text[c.startOffset] != '<') return null
+        var open = -1
+        var i = c.startOffset
+        while (i < c.endOffset - 1) {
+            if (text[i] == '{' && text[i + 1] == '*') { open = i; break }
+            i++
+        }
+        if (open < 0) return null
+        var close = -1
+        var j = c.endOffset - 2
+        while (j > open) {
+            if (text[j] == '*' && text[j + 1] == '}') { close = j; break }
+            j--
+        }
+        if (close < 0) return null
+        return (open + 2) to close
     }
 
     /**
@@ -459,7 +559,9 @@ object SkyTemplateRanges {
      *   - **IF / switch block with at least one branch** (`{:}` / `{:case}` /
      *     `{else}` / `{elseif}`) — the branches are mutually exclusive, so the
      *     same `id` / declaration appearing in two different branches never
-     *     coexists at runtime.
+     *     coexists at runtime. `{?:expr}` (elvis) counts as branched from the
+     *     start — the compiler's `tagElvis` emits both the `if` and its
+     *     `else` in a single tag, so no separate `{:}` ever follows.
      *
      * A plain `{?cond}…{/}` with NO branch is intentionally excluded — its body
      * can still collide with identical content sitting outside the `if`, so
@@ -482,6 +584,7 @@ object SkyTemplateRanges {
             when (classifyBlockKind(text, r.startOffset, r.endOffset)) {
                 BlockKind.OPEN_LOOP -> stack.addLast(Frame(r.startOffset, true, false))
                 BlockKind.OPEN_IF -> stack.addLast(Frame(r.startOffset, false, false))
+                BlockKind.OPEN_IF_ELVIS -> stack.addLast(Frame(r.startOffset, false, true))
                 BlockKind.BRANCH -> stack.lastOrNull()?.hasBranch = true
                 BlockKind.CLOSE -> {
                     val f = stack.removeLastOrNull() ?: continue
@@ -494,7 +597,47 @@ object SkyTemplateRanges {
         return result
     }
 
-    private enum class BlockKind { OPEN_LOOP, OPEN_IF, BRANCH, CLOSE, OTHER }
+    private enum class BlockKind { OPEN_LOOP, OPEN_IF, OPEN_IF_ELVIS, BRANCH, CLOSE, OTHER }
+
+    /**
+     * Locate the inner `{ … }` brace bounds within a (possibly wrapped) tag
+     * range. For plain `{ … }` the result equals the input; for the wrapped
+     * `<!--{ … }-->` form the bounds skip the `<!--…-->` shell so a
+     * classifier reads the directive body instead of tripping over the shell
+     * (`text[openOffset]` would be `<`, not `{`).
+     *
+     * Shared by every tag classifier in the plugin (post-format re-indent,
+     * Enter handler, closing-tag aligner, block actions, duplicate
+     * suppression) so wrapped and plain tags classify identically —
+     * originally a [SkyTemplateFoldingScanner]-only helper, promoted here so
+     * the pairing/folding layer and the indent layer agree on wrapped tags.
+     *
+     * Returns `(innerOpen, innerCloseEnd)` — `innerOpen` is the offset of `{`
+     * and `innerCloseEnd` is one past the matching `}`. Returns null if the
+     * range doesn't contain a recognisable brace pair.
+     */
+    fun innerBraceBounds(text: CharSequence, openOffset: Int, closeEndOffset: Int): Pair<Int, Int>? {
+        if (openOffset >= closeEndOffset) return null
+        if (text[openOffset] == '{') {
+            return openOffset to closeEndOffset
+        }
+        // Wrapped form `<!--+{ … }--+>` — search inside the wrapper for the
+        // first `{` and the last `}`. SkyTemplate's compiler permits any
+        // number of leading / trailing dashes (≥2), so we don't pin to a
+        // fixed shell length.
+        if (text[openOffset] == '<' && openOffset + 4 <= closeEndOffset) {
+            var open = -1
+            for (i in openOffset until closeEndOffset) {
+                if (text[i] == '{') { open = i; break }
+            }
+            var close = -1
+            for (i in closeEndOffset - 1 downTo openOffset) {
+                if (text[i] == '}') { close = i; break }
+            }
+            if (open >= 0 && close > open) return open to (close + 1)
+        }
+        return null
+    }
 
     /**
      * Classify a `{ … }` tag for [computeDuplicateSuppressionRanges]. Splits
@@ -503,8 +646,10 @@ object SkyTemplateRanges {
      * used by the other tag classifiers in this plugin.
      */
     private fun classifyBlockKind(text: CharSequence, openOffset: Int, closeEndOffset: Int): BlockKind {
-        val bodyStart = openOffset + 1
-        val bodyEnd = closeEndOffset - 1
+        val (innerOpen, innerCloseEnd) = innerBraceBounds(text, openOffset, closeEndOffset)
+            ?: return BlockKind.OTHER
+        val bodyStart = innerOpen + 1
+        val bodyEnd = innerCloseEnd - 1
         if (bodyEnd <= bodyStart) return BlockKind.OTHER
         var i = bodyStart
         while (i < bodyEnd && (text[i] == ' ' || text[i] == '\t')) i++
@@ -513,7 +658,15 @@ object SkyTemplateRanges {
         val hasLeadingWs = i > bodyStart
         if (first == '/') return BlockKind.CLOSE
         if (first == ':') return BlockKind.BRANCH
-        if (first == '?') return BlockKind.OPEN_IF
+        if (first == '?') {
+            // `{?:expr}` (elvis) — the compiler's `tagElvis` emits a
+            // ready-made `if (...) { echo … } else { ?>` in ONE tag, i.e. an
+            // if AND its else branch at once. Classify separately from a
+            // plain `{?cond}` so the stack frame starts with hasBranch
+            // already set (see BlockKind.OPEN_IF_ELVIS below) instead of
+            // requiring a later `{:}` that never comes.
+            return if (i + 1 < bodyEnd && text[i + 1] == ':') BlockKind.OPEN_IF_ELVIS else BlockKind.OPEN_IF
+        }
         if (first == '@' || first == '%') return BlockKind.OPEN_LOOP
         if (hasLeadingWs) return BlockKind.OTHER
         if (!(first.isLetter() || first == '_')) return BlockKind.OTHER
@@ -613,11 +766,18 @@ object SkyTemplateRanges {
         //    so a body like `// js comment\nstmt;` would otherwise pass via
         //    this early-return. Demand the closer shape `/\h*(?://.*)?` for
         //    `/` and let other prefixes through unconditionally.
+        //
+        //    `&` `:` `+` are special too: CSS Nesting opens a rule body with
+        //    these same characters (`& .title { }`, `:hover { }`,
+        //    `+ .sibling { }`). Confirmed policy: reject those via
+        //    [looksLikeCssNesting] instead of accepting on prefix-char alone.
         if (first == '/') {
             if (looksLikeCloserPattern(text, firstNonWs, bodyEnd)) return true
             // Else fall through — a stray `/` that isn't the closer pattern
             // (e.g. `{/end}` or `{/foo}`) will be rejected by the keyword
             // and dotted-chain checks below.
+        } else if (first == '&' || first == ':' || first == '+') {
+            if (!looksLikeCssNesting(text, first, firstNonWs, bodyStart, bodyEnd)) return true
         } else if (T.isTagPrefixChar(first) || first == '*') {
             return true
         }
@@ -651,7 +811,9 @@ object SkyTemplateRanges {
             }
             when (c) {
                 '\'', '"' -> inString = c
-                '|' -> if (k + 1 >= effectiveBodyEnd || text[k + 1] != '|') hasPipe = true
+                '|' -> if (k + 1 < effectiveBodyEnd && text[k + 1] == '|') {
+                    k++
+                } else hasPipe = true
                 '-' -> if (k + 1 < effectiveBodyEnd && text[k + 1] == '>') {
                     hasArrow = true
                     k++
@@ -770,6 +932,64 @@ object SkyTemplateRanges {
         if (j >= bodyEnd) return true
         if (j + 1 < bodyEnd && text[j] == '/' && text[j + 1] == '/') return true
         return false
+    }
+
+    /**
+     * True when a `&` / `:` / `+` prefixed `{ … }` body looks like CSS
+     * Nesting rather than SkyTemplate's `{&block}` refer / `{:}` `{:case}`
+     * branch / `{+file}` execute tags (confirmed policy, P2-11):
+     *
+     *   1. Vertical whitespace (`\t` / `\r` / `\n`) anywhere in the body —
+     *      CSS Nesting rules are written across lines; none of the three
+     *      tag forms ever need one.
+     *   2. A nested `{` / `}` — a rule body, never valid inside these tags.
+     *   3. `&` specifically must additionally match the compiler's refer-tag
+     *      shape (an identifier, optionally quoted / with a `:file` suffix —
+     *      see [looksLikeReferArg]) — `& .title` / `&.active` / `&:hover`
+     *      (parent-selector combinators) are rejected even with no nested
+     *      brace.
+     */
+    private fun looksLikeCssNesting(
+        text: CharSequence,
+        first: Char,
+        prefixOffset: Int,
+        bodyStart: Int,
+        bodyEnd: Int,
+    ): Boolean {
+        for (i in bodyStart until bodyEnd) {
+            val c = text[i]
+            if (c == '\t' || c == '\r' || c == '\n' || c == '{' || c == '}') return true
+        }
+        return first == '&' && !looksLikeReferArg(text, prefixOffset, bodyEnd)
+    }
+
+    /**
+     * True when [ampOffset] (the `&`) through [bodyEnd] matches the
+     * compiler's `tagRefer` argument shape: `&` + optional horizontal
+     * whitespace + optional matching quote + an identifier + optional
+     * `:file` suffix + the closing quote (if any) + optional trailing
+     * whitespace. Rejects CSS Nesting's parent-selector `&` — `& .title`,
+     * `&.active`, `&:hover` — none of which start with an identifier char.
+     */
+    private fun looksLikeReferArg(text: CharSequence, ampOffset: Int, bodyEnd: Int): Boolean {
+        var i = ampOffset + 1
+        while (i < bodyEnd && isHorizontalWhitespace(text[i])) i++
+        if (i >= bodyEnd) return false
+        val quote = text[i].takeIf { it == '\'' || it == '"' }
+        if (quote != null) i++
+        if (i >= bodyEnd || !(text[i].isLetter() || text[i] == '_')) return false
+        i++
+        while (i < bodyEnd && (text[i].isLetterOrDigit() || text[i] == '_')) i++
+        if (i < bodyEnd && text[i] == ':') {
+            i++
+            while (i < bodyEnd && text[i] != '\'' && text[i] != '"' && !isHorizontalWhitespace(text[i])) i++
+        }
+        if (quote != null) {
+            if (i >= bodyEnd || text[i] != quote) return false
+            i++
+        }
+        while (i < bodyEnd && isHorizontalWhitespace(text[i])) i++
+        return i >= bodyEnd
     }
 
     /**

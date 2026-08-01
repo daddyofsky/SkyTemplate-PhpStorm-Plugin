@@ -386,6 +386,48 @@ class SkyTemplatePhpResolveIntegrationTest : BasePlatformTestCase() {
         assertEquals("Fmt", resolved!!.containingClass?.name)
     }
 
+    /**
+     * P2-9 regression: the compiler emits `use {$formatter} as _F;`
+     * (SkyTemplateCompiler.php:229) — PHP resolves plain `use` statements
+     * from the root namespace only, never from the compiled file's own
+     * `namespace` declaration. So when the plugin's `namespace` setting is
+     * non-root and no *global* class matches the formatter's simple name,
+     * the pipe filter must fall back to the global function exactly like
+     * the compiler — even though a same-named class exists under that
+     * configured namespace.
+     */
+    fun testFormatterClassIsNotResolvedThroughConfiguredNamespacePrefix() {
+        myFixture.addFileToProject(
+            "NamespacedOnlyFormatter.php",
+            """
+            <?php
+            namespace App;
+            class Fmt {
+                public static function money(int ${'$'}n): string { return ''; }
+            }
+            function money(int ${'$'}n): string { return ''; }
+            """.trimIndent()
+        )
+        IndexingTestUtil.waitUntilIndexesAreReady(project)
+        TemplateLangSettings.getInstance(project).loadState(
+            TemplateLangSettings.State().apply {
+                enabled = true
+                namespace = "App"
+                formatterClass = "Fmt"
+            }
+        )
+
+        val ref = firstSkyRef("<p>{price|money}</p>", "money") as SkyTemplatePhpReference
+        val results = ref.multiResolve(false)
+        assertTrue("expected resolution results", results.isNotEmpty())
+        assertTrue(
+            "formatter must not be inferred via the configured-namespace prefix " +
+                "(compiler's `use Fmt as _F;` always resolves from root, never \\App\\Fmt); " +
+                "expected the global function, got ${results.map { it.element?.javaClass?.simpleName }}",
+            results.all { it.element is PhpFunction && it.element !is Method },
+        )
+    }
+
     /** Pipe named args (`{x|money=digits=2}`) resolve against the formatter method's parameters. */
     fun testPipeNamedArgResolvesFormatterMethodParameter() {
         myFixture.addFileToProject(
@@ -890,6 +932,82 @@ class SkyTemplatePhpResolveIntegrationTest : BasePlatformTestCase() {
         val skyHits = results.filterIsInstance<SkyTemplatePhpReference>()
         assertTrue(
             "ReferencesSearch in plain XmlText must also find template hit. " +
+                "Got ${results.size} total, ${skyHits.size} sky.",
+            skyHits.isNotEmpty(),
+        )
+    }
+
+    // ── P3-10: multiple usages in the same host element ─────────────────────
+
+    /**
+     * `processElementsWithWord` invokes the callback once per occurrence of
+     * the word within an element (each with its own `offsetInElement`).
+     * `SkyTemplateReferencesSearchExecutor` previously ignored that offset
+     * and always reported the FIRST matching ref found on the node — so two
+     * calls to the same function inside a single `XmlText` node reported
+     * only one usage (the first), duplicated, instead of both.
+     */
+    fun testFindUsages_twoCallsInSameTextNode_bothReported() {
+        myFixture.addFileToProject(
+            "lib.php",
+            """
+            <?php
+            function dupCallFn(): void {}
+            """.trimIndent()
+        )
+        // Attribute value: the leaf (`XmlTokenImpl`) carries no references at
+        // all for this shape (see class doc), so the platform's default
+        // executors cannot find either usage — only our custom executor's
+        // walk can, isolating exactly the offsetInElement fix under test.
+        myFixture.configureByText(
+            "page.html",
+            """<a href="{=dupCallFn()}-{=dupCallFn()}">link</a>""",
+        )
+        IndexingTestUtil.waitUntilIndexesAreReady(project)
+
+        val fn = PhpIndex.getInstance(project)
+            .getFunctionsByFQN("\\dupCallFn")
+            .firstOrNull() ?: error("PHP function not indexed")
+
+        val results = com.intellij.psi.search.searches.ReferencesSearch
+            .search(fn, com.intellij.psi.search.GlobalSearchScope.allScope(project))
+            .findAll()
+        val skyHits = results.filterIsInstance<SkyTemplatePhpReference>()
+        val distinctRanges = skyHits.map { it.element.textRange.startOffset + it.rangeInElement.startOffset }.toSet()
+        assertEquals(
+            "both `dupCallFn()` calls in the same text node must be reported as distinct " +
+                "usages, got ranges $distinctRanges from $skyHits",
+            2, distinctRanges.size,
+        )
+    }
+
+    // ── P3-10b: case-insensitive Find Usages ─────────────────────────────────
+
+    fun testFindUsages_caseInsensitiveFunctionName_isFound() {
+        myFixture.addFileToProject(
+            "lib.php",
+            """
+            <?php
+            function myfunc(): void {}
+            """.trimIndent()
+        )
+        // Attribute value: isolates the custom executor's own word-index
+        // search (and its case-sensitivity flag) from the platform's
+        // default reference search, which returns no references at all for
+        // this leaf shape (see class doc).
+        myFixture.configureByText("page.html", """<a href="{=MyFunc()}">link</a>""")
+        IndexingTestUtil.waitUntilIndexesAreReady(project)
+
+        val fn = PhpIndex.getInstance(project)
+            .getFunctionsByFQN("\\myfunc")
+            .firstOrNull() ?: error("PHP function not indexed")
+
+        val results = com.intellij.psi.search.searches.ReferencesSearch
+            .search(fn, com.intellij.psi.search.GlobalSearchScope.allScope(project))
+            .findAll()
+        val skyHits = results.filterIsInstance<SkyTemplatePhpReference>()
+        assertTrue(
+            "differently-cased template call `{=MyFunc()}` must be found for `function myfunc()`. " +
                 "Got ${results.size} total, ${skyHits.size} sky.",
             skyHits.isNotEmpty(),
         )

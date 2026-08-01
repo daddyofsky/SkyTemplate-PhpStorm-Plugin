@@ -377,8 +377,10 @@ object SkyTemplateBlockActionsLogic {
     private enum class SplitKind { OPEN, CLOSE, BRANCH, OTHER }
 
     private fun classifySplit(text: CharSequence, openOffset: Int, closeEndOffset: Int): SplitKind {
-        val bodyStart = openOffset + 1
-        val bodyEnd = closeEndOffset - 1
+        val (innerOpen, innerCloseEnd) = SkyTemplateRanges.innerBraceBounds(text, openOffset, closeEndOffset)
+            ?: return SplitKind.OTHER
+        val bodyStart = innerOpen + 1
+        val bodyEnd = innerCloseEnd - 1
         if (bodyEnd <= bodyStart) return SplitKind.OTHER
         var i = bodyStart
         while (i < bodyEnd && (text[i] == ' ' || text[i] == '\t')) i++

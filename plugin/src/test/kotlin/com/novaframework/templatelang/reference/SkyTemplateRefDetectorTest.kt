@@ -197,10 +197,16 @@ class SkyTemplateRefDetectorTest {
         assertEquals("Enums\\Test", method.classNameInSource)
     }
 
-    @Test fun pipeFunction_absoluteFqnClassMethod() {
+    @Test fun pipeFunction_absoluteFqnClassMethod_failsCompilerGate() {
+        // Compiler gate (SkyTemplateCompiler::parseFunction) tests the WHOLE
+        // `$func` string against `/^[a-z][\w\\:]*$/i` — a LEADING backslash
+        // (absolute FQN) fails the `[a-z]` first-char requirement, so
+        // `{var|\App\Util::fmt}` is a no-op filter at runtime (skipped via
+        // `continue`), not a call to `Util::fmt`. No refs must be emitted —
+        // emitting CLASS/METHOD here would be a ghost navigation target.
         val refs = detect("{var|\\App\\Util::fmt}")
-        val cls = refs.first { it.kind == Kind.CLASS }
-        assertEquals("\\App\\Util", cls.nameInSource)
+        assertTrue("gate-failing absolute-FQN pipe filter must emit no refs, got $refs",
+            refs.isEmpty())
     }
 
     @Test fun pipeFunction_flaggedAsPipeFilter() {
@@ -225,6 +231,36 @@ class SkyTemplateRefDetectorTest {
         val param = refs.first { it.kind == Kind.PARAMETER_NAME }
         assertTrue(param.isPipeFilter)
         assertEquals("fmt", param.callTargetName)
+    }
+
+    // ── P2-14 / P3-6: compiler filter-name gate ────────────────────────────
+
+    @Test fun pipeFunction_leadingUnderscore_failsCompilerGate() {
+        // Compiler gate (`/^[a-z][\w\\:]*$/i`) requires the first char to be
+        // a letter — `_foo` fails it, so the compiler `continue`s past the
+        // whole filter (no call emitted). Must not surface a FUNCTION ref.
+        val refs = detect("{var|_foo}")
+        assertTrue("gate-failing filter name must emit no refs, got $refs", refs.isEmpty())
+    }
+
+    @Test fun pipeFunction_leadingUnderscore_argsNotScannedEither() {
+        // Since the compiler skips the whole filter, named-args in its
+        // arg list must not surface as PARAMETER_NAME either.
+        val refs = detect("{var|_foo=name=1}")
+        assertTrue("gate-failing filter must not scan its args, got $refs", refs.isEmpty())
+    }
+
+    @Test fun pipeFunction_validName_stillPassesGate() {
+        // Sanity: a normal filter name must be unaffected by the gate.
+        val refs = detect("{var|trim}")
+        assertEquals(1, refs.size)
+        assertEquals(Kind.FUNCTION, refs[0].kind)
+        assertEquals("trim", refs[0].nameInSource)
+    }
+
+    @Test fun pipeFunction_leadingDigit_failsCompilerGate() {
+        val refs = detect("{var|2foo}")
+        assertTrue("digit-led filter name must fail the gate, got $refs", refs.isEmpty())
     }
 
     @Test fun expressionFunctionCall_NOT_flaggedAsPipeFilter() {

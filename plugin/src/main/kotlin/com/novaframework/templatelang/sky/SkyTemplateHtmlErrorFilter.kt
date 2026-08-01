@@ -209,6 +209,11 @@ class SkyTemplateHtmlErrorFilter : HighlightInfoFilter {
         // M7: unclosed block + orphan branch
         if (description.startsWith("Unclosed `")) return true
         if (description.endsWith("outside `{if}` / `{loop}` block")) return true
+        // P3-11: SkyTemplateStructuralAnnotator's missing-loop-name diagnostic
+        // (`{loop}` / `{each}` / `{@}` / `{%}` with no argument) sits ON the
+        // template range by definition — without this whitelist entry it was
+        // silently dropped by the per-range overlap suppression below.
+        if (description == "Loop tag name is missing") return true
         // 0.5.25 scope/var diagnostics — kept in lockstep with the message
         // strings produced by SkyTemplateScopeAnalyzer.
         if (description.startsWith("Loop-scope reference `")) return true

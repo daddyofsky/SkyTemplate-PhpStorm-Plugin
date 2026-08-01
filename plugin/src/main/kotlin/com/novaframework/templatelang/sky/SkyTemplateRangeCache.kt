@@ -56,11 +56,20 @@ internal object SkyTemplateRangeCache {
     private var cached: Entry? = null
 
     private class Entry(val text: CharSequence, val length: Int) {
+        // Not exposed by a `get*` accessor — [computeCommentRanges] /
+        // [computeTemplateRanges] both need it, so it's cached here purely
+        // so those two lazies (and, transitively, [blockPairing]) share one
+        // PHP-region scan instead of each computing their own.
+        private val phpRanges: List<TextRange> by lazy(LazyThreadSafetyMode.PUBLICATION) {
+            SkyTemplateRanges.computePhpRanges(text)
+        }
         val templateRanges: List<TextRange> by lazy(LazyThreadSafetyMode.PUBLICATION) {
-            SkyTemplateRanges.computeTemplateRanges(text)
+            if (text.isEmpty() || '{' !in text) emptyList()
+            else SkyTemplateRanges.computeTemplateRanges(text, commentRanges, phpRanges)
         }
         val commentRanges: List<TextRange> by lazy(LazyThreadSafetyMode.PUBLICATION) {
-            SkyTemplateRanges.computeCommentRanges(text)
+            if (text.isEmpty() || "{*" !in text) emptyList()
+            else SkyTemplateRanges.computeCommentRanges(text, phpRanges)
         }
         val indentRanges: List<TextRange> by lazy(LazyThreadSafetyMode.PUBLICATION) {
             SkyTemplateRanges.computeIndentRanges(text)
@@ -68,8 +77,13 @@ internal object SkyTemplateRangeCache {
         val protectedEmbeddedRanges: List<TextRange> by lazy(LazyThreadSafetyMode.PUBLICATION) {
             SkyTemplateRanges.computeProtectedEmbeddedRanges(text)
         }
+        // Shares this same entry's `commentRanges` / `templateRanges` lazies
+        // instead of letting SkyTemplateFoldingScanner recompute its own —
+        // a consumer that touches both (e.g. the folding builder running
+        // right after an inspection pass touched templateRanges) no longer
+        // pays for the comment-lex / PHP-region / brace-pairing scan twice.
         val blockPairing: SkyTemplateFoldingScanner.BlockPairingResult by lazy(LazyThreadSafetyMode.PUBLICATION) {
-            SkyTemplateFoldingScanner.analyze(text)
+            SkyTemplateFoldingScanner.analyze(text, commentRanges, templateRanges)
         }
     }
 

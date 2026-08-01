@@ -256,24 +256,43 @@ object SkyTemplateRefDetector {
             // Phase 1 spec D-3: pipe `Cls::method=name=value` named args are
             // out-of-scope for now; we still emit CLASS + METHOD refs and
             // intentionally do NOT scan a trailing `=…` for named args.
+            var j = afterIdent + 1
+            j = skipWs(tokens, j, toExclusive)
+            val memberTok = if (j < toExclusive && tokens[j].type === T.IDENTIFIER) tokens[j] else null
+            val memberName = memberTok?.let { text.substring(it.start, it.end) }
+            // Compiler gate (SkyTemplateCompiler::parseFunction) tests the
+            // WHOLE `$func` string — for `Cls::method` that's "Cls::method",
+            // not just the class part.
+            if (!isValidFilterName(parsed.fqn + "::" + (memberName ?: ""))) {
+                return if (memberTok != null) j + 1 else j
+            }
             refs += Ref(
                 kind = Kind.CLASS,
                 rangeInHost = parsed.lastTok.toRange(baseOffset),
                 nameInSource = parsed.fqn,
             )
-            var j = afterIdent + 1
-            j = skipWs(tokens, j, toExclusive)
-            if (j < toExclusive && tokens[j].type === T.IDENTIFIER) {
-                val memberTok = tokens[j]
+            if (memberTok != null) {
                 refs += Ref(
                     kind = Kind.METHOD,
                     rangeInHost = memberTok.toRange(baseOffset),
-                    nameInSource = text.substring(memberTok.start, memberTok.end),
+                    nameInSource = memberName!!,
                     classNameInSource = parsed.fqn,
                 )
                 return j + 1
             }
             return j
+        }
+
+        // Compiler gate (SkyTemplateCompiler::parseFunction,
+        // `/^[a-z][\w\\:]*$/i`): a filter name failing this regex is never
+        // dispatched — the whole `|name…` segment is skipped (`continue` in
+        // the compiler's chain loop) and the piped value passes through
+        // unchanged. `{var|_foo}` is therefore a no-op, not a call to
+        // `_foo()` — emitting a FUNCTION ref (and scanning its args) here
+        // would produce a bogus "unresolved symbol" warning and a ghost
+        // navigation target.
+        if (!isValidFilterName(parsed.fqn)) {
+            return parsed.nextIdx
         }
 
         refs += Ref(
@@ -299,6 +318,15 @@ object SkyTemplateRefDetector {
     }
 
     /**
+     * Mirror of the compiler's pipe-filter name gate
+     * (`SkyTemplateCompiler::parseFunction`, `/^[a-z][\w\\:]*$/i`). Applies
+     * to the full `$func` string, including any `Cls::method` shape.
+     */
+    private fun isValidFilterName(name: String): Boolean = FILTER_NAME_GATE.matches(name)
+
+    private val FILTER_NAME_GATE = Regex("^[a-zA-Z][\\w\\\\:]*$")
+
+    /**
      * Scan filter arguments after `|fn=`. Tokens are split into csv buckets
      * by top-level COMMA; within each bucket, an IDENTIFIER followed (after
      * optional whitespace) by a top-level EQ is a named-arg name.
@@ -321,27 +349,33 @@ object SkyTemplateRefDetector {
         callTarget: String,
     ) {
         var i = from
+        var depth = 0
         // Process csv-separated buckets. Each iteration consumes one bucket.
         while (i < toExclusive) {
             i = skipWs(tokens, i, toExclusive)
             if (i >= toExclusive) break
             val t = tokens[i]
-            // Pipe args end at the next PIPE (chained filter) or RBRACE.
-            if (t.type === T.PIPE || t.type === T.RBRACE) break
-            // Top-level COMMA separates buckets — just consume and continue.
-            if (t.type === T.COMMA) { i++; continue }
-            // Look for `<IDENT> =` at the start of the bucket — that's a
-            // named arg. The `=` here is the SkyTemplate EQ token, same one
-            // used as the filter-args separator; inside a bucket it can only
-            // be a named-arg `=` because the bucket already started after
-            // the filter's leading EQ.
+            // Pipe args end at the next top-level PIPE (chained filter) or
+            // RBRACE — a `|` / `}` inside a nested call's own args (depth > 0)
+            // belongs to that call, not this filter's bucket list.
+            if (depth == 0 && (t.type === T.PIPE || t.type === T.RBRACE)) break
+            when (t.type) {
+                T.LPAREN, T.LBRACKET -> { depth++; i++; continue }
+                T.RPAREN, T.RBRACKET -> { if (depth > 0) depth--; i++; continue }
+                else -> {}
+            }
+            // Look for `<IDENT> =` at the start of a TOP-LEVEL bucket —
+            // that's a named arg. Depth > 0 means we're inside a nested
+            // call's own argument list (e.g. `{x|fmt=foo(a=1)}`), where
+            // `a=1` belongs to `foo`, not this filter — must not be
+            // misread as a named arg of the filter itself.
             //
             // L-003 (Phase 2): if the EQ is immediately followed by another
             // EQ (i.e. `count==2`, `a===b`), treat the bucket as a
             // comparison expression — NOT a named arg. `>=`, `<=`, `!=`,
             // `<>` already fail the IDENT/EQ shape because their leading
             // operator char isn't part of the identifier.
-            if (t.type === T.IDENTIFIER) {
+            if (depth == 0 && t.type === T.IDENTIFIER) {
                 val next = skipWs(tokens, i + 1, toExclusive)
                 if (next < toExclusive && tokens[next].type === T.EQ) {
                     val afterEq = next + 1

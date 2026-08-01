@@ -96,6 +96,21 @@ class SkyTemplateLexerTest {
         assertEquals(T.TAG_PREFIX, types.find { it == T.TAG_PREFIX })
     }
 
+    @Test fun keywordWithLeadingSpaceIsNotTagKeyword() {
+        // Compiler PATTERN_TAG's keyword alternative requires the keyword to
+        // directly abut `{` (no whitespace) — `{ loop x}` falls through to
+        // the "invalid tag" branch and is re-parsed as a variable/expression
+        // body, not a `{loop}` block opener. The lexer must mirror that: no
+        // TAG_KEYWORD token, `loop` lexes as a plain IDENTIFIER.
+        val t = tokens("{ loop x}")
+        val types = t.map { it.first }
+        assertEquals(
+            listOf(T.LBRACE, T.WHITE_SPACE_INSIDE, T.IDENTIFIER, T.WHITE_SPACE_INSIDE, T.IDENTIFIER, T.RBRACE),
+            types,
+        )
+        assertEquals("loop", t[2].second)
+    }
+
     @Test fun upperCaseKeywordIsTagKeyword() {
         // Compiler PATTERN_TAG carries the `/i` flag, so `{LOOP …}`,
         // `{Loop …}`, and `{loop …}` are all valid keyword tags. The

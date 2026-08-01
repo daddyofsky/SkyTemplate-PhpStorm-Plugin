@@ -50,15 +50,29 @@ class SkyTemplatePreFormatProcessor : PreFormatProcessor {
         if (!TemplateLangFileFilter.shouldProcess(psiFile)) return range
         val document = psiFile.viewProvider.document ?: return range
 
-        // A prior snapshot with no matching post pass (re-entrant format,
-        // cancelled run) would otherwise leak markers and shadow this one.
-        document.getUserData(SNAPSHOT_KEY)?.let { stale ->
-            stale.forEach { it.first.dispose() }
-            document.putUserData(SNAPSHOT_KEY, null)
+        // Merge with any snapshot left by an earlier process() call in the
+        // SAME Reformat operation — e.g. "Reformat only VCS changed lines"
+        // splits one Reformat into several FormatTextRanges, so process()
+        // runs once per range on the same document. Wholesale-disposing here
+        // (the old behaviour) would drop an earlier range's `<script>` /
+        // `<style>` snapshot before SkyTemplatePostFormatProcessor ever sees
+        // it. Instead: keep every still-valid entry that does not overlap
+        // THIS range; an overlapping entry is stale for this pass (its
+        // region is about to be re-snapshotted fresh below) and is disposed.
+        val previous = document.getUserData(SNAPSHOT_KEY) ?: emptyList()
+        val snapshot = ArrayList<Pair<RangeMarker, String>>(previous.size)
+        for (entry in previous) {
+            val marker = entry.first
+            val overlapsThisRange = marker.isValid &&
+                marker.startOffset < range.endOffset && marker.endOffset > range.startOffset
+            if (!marker.isValid || overlapsThisRange) {
+                marker.dispose()
+            } else {
+                snapshot += entry
+            }
         }
 
         val text = document.charsSequence
-        val snapshot = ArrayList<Pair<RangeMarker, String>>()
 
         // 1. Whole `<script>` / `<style>` bodies that carry Sky tags. The
         //    JS / CSS formatter mangles the whitespace BETWEEN tags (splits a
@@ -88,7 +102,11 @@ class SkyTemplatePreFormatProcessor : PreFormatProcessor {
             snapshot += document.createRangeMarker(tag.startOffset, tag.endOffset) to original
         }
 
-        if (snapshot.isNotEmpty()) document.putUserData(SNAPSHOT_KEY, snapshot)
+        // Always assign (not just when non-empty): the merge above may have
+        // disposed every carried-over entry (stale / overlapping) without
+        // this call adding a replacement, in which case the stale list
+        // reference itself must be cleared rather than left dangling.
+        document.putUserData(SNAPSHOT_KEY, if (snapshot.isNotEmpty()) snapshot else null)
 
         return range
     }

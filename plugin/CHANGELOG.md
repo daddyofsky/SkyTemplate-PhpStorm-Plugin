@@ -4,6 +4,140 @@ All notable changes to the **SkyTemplate** PhpStorm plugin are recorded in
 this file. The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to semantic versioning.
 
+## [1.2.4] — 2026-08-01
+
+Wrapped-comment fixes plus a full-codebase stability audit wave (five parallel
+review passes over the scan, indent, inspection, reference, and VSCode-port
+layers).
+
+### Fixed
+
+- **Wrapped comment split at an inner `}-->`** — the lazy wrapper regex
+  (`<!--+\{ … \}--+>`) stopped at the FIRST `}-->` inside the comment body,
+  so a `<!--{* … *}-->` comment containing `<!--{? …}-->` … `<!--{/}-->`
+  was cut short and its closing `*}-->` tail was covered by no template
+  range. The host HTML parser's mismatched-comment errors on that tail were
+  therefore not suppressed. Wrapped comments are now detected from the
+  lexer's `{* … *}` range outward (extend over a directly adjacent
+  `<!--` / `-->` shell), so any number of inner `}-->` markers stay inside
+  ONE comment range.
+- **Wrapped directives inside a comment broke block pairing** — a wrapped
+  `<!--{/}-->` (or `<!--{? …}-->`) written inside a `{* … *}` /
+  `<!--{* … *}-->` comment body was still registered as a live template
+  range, so the inner closer popped the enclosing block's frame and every
+  `{:}` / `{/}` after the comment was reported as orphan / unmatched.
+  Comment ranges now take precedence: wrapped-directive matches overlapping
+  a comment are dropped from template ranges, folding, and pairing (plain
+  `{…}` tags inside comments were already inert).
+- **`a || b` no longer mistaken for a pipe filter** — the tag heuristic's
+  `|` scan consumed only one character of `||`, so the second `|` marked
+  JS bodies like `{ y = a || b; }` as SkyTemplate tags: genuine JS errors
+  were suppressed, the block was recoloured, and Reformat protected the
+  whole `<script>` verbatim.
+- **Static-method parameter info (Ctrl+P)** — an off-by-one in the
+  `Cls::method(` class-name extraction dropped the final character
+  (`Abc` → `Ab`), so parameter info never resolved for parenthesised
+  static calls; single-letter classes fell back to a same-named global
+  function.
+- **Pipe positional-after-named false error** — the compiler reorders pipe
+  arguments (`array_merge($positional, $named)`), so
+  `{var|str_pad=pad_type=1,10}` compiles fine; the "positional after
+  named" rule now applies to the paren form only.
+- **v1.2.4 regressions from the wrapped-comment rework** — comment-scoped
+  block indent inside `<!--{* … *}-->` went dead (body bounds assumed a
+  `{*` start), and the argument inspections validated example calls inside
+  wrapped comments (comment-skip only recognised `{*`-leading ranges).
+- **A comment containing a PHP fragment is still a comment** — policy
+  decision: comments take precedence over PHP regions. A `{* … <?=$x?> … *}`
+  comment was discarded whole (its tags coming back alive as spurious
+  "Unclosed block"); now only a comment whose `{*` itself starts inside a
+  PHP region is rejected.
+- **CSS Nesting bodies no longer read as template tags** — policy decision:
+  for the CSS-colliding prefixes `&` / `:` / `+`, a body containing tabs,
+  newlines, or nested braces is CSS, and `&` must match the compiler's
+  refer-tag shape (`{&blockName}`) — `& .title { … }` / `:hover { … }` /
+  `+ .sibling { … }` stay CSS.
+- **Pipe filters honour the formatter class everywhere** — v1.2.3 applied
+  formatter-method-first dispatch to resolve/navigation only; Ctrl+P
+  parameter info, inlay parameter hints, and the argument-count /
+  named-argument inspections still consulted the global function, producing
+  wrong signatures and false arity warnings when names collided.
+- **`{&block}` (refer) no longer pushes a block frame** — the scope
+  analyzer treated refer as an if-opener, so a following `{/}` popped the
+  wrong frame: loop-scope warnings went missing and duplicate-`{:}`
+  detection was silenced.
+- **Member access after `.` / `->` / `::` is not a variable reference** —
+  `{row._value}` outside a loop warned RESERVED_OUTSIDE_LOOP although the
+  compiler compiles it as plain array access; trailing identifiers are no
+  longer collected as standalone variable refs (also resolves the
+  `{user.roles@2}` redundant-`@` false positive).
+- **Wrapped `<!--{…}-->` directives are first-class for indent** — the
+  indent-layer classifiers (Reformat, Enter, `}` alignment, block actions,
+  duplicate suppression) read the wrapper shell as body text, so a wrapped
+  closer never popped its frame (whole-file over-indent after
+  `{loop}…<!--{/}-->`) and wrapped-only files got no indent support. All
+  classifiers now share folding's `innerBraceBounds`.
+
+- **Multi-range Reformat keeps every `<script>`/`<style>` snapshot** —
+  "Reformat only changed lines" style invocations split one reformat into
+  several ranges; each range used to discard the previous ranges'
+  protection snapshots, mangling earlier SkyTemplate-bearing script bodies.
+  Snapshots now merge.
+- **Move Statement out of a block re-indents the moved line** — the
+  lift-only re-indent policy left a line moved *out* of `{loop}`/`{?}`
+  at its old deeper indent; lines the mover relocates are now set to
+  their exact expected indent (manual indent elsewhere stays respected).
+- **`.sky` multi-tree annotator double-run guard** — the HTML-language
+  annotators also fired on the HTML data tree of `.sky` files, duplicating
+  analysis (and potentially markers) already produced by the
+  SkyTemplate-language inspections.
+- **Pipe-argument tooling matches the compiler's argument model** — Ctrl+P
+  highlighting now accounts for the auto-prepended `##` input and quoted
+  commas (and works at all — the call-start scanner bailed on `{`, so pipe
+  mode was unreachable); inlay hints and Ctrl+P reflect the compiler's
+  positional-before-named reordering; empty pipe arguments (`{v|fn=a,,b}`)
+  count as real `''` positionals; static pipe filters (`{var|Cls::m}`) are
+  validated; nested calls (`{=outer(inner(...))}`) are validated; filter
+  names the compiler ignores (`{var|_foo}`) no longer produce references
+  or undefined-symbol warnings.
+- **`{ loop x}` is not a keyword** — the lexer coloured a
+  leading-whitespace keyword the compiler would treat as a variable.
+- **Scope analysis edge cases** — `{: // comment}` counts as a bare else
+  (duplicate-`{:}` detection restored); `{\…}` escape-literal bodies are
+  no longer scope-checked; `{?:expr}` participates in branch-aware
+  duplicate suppression; wrapped directives inside PHP string literals are
+  ignored.
+- **Completion / Find Usages parity** — `Cls::` member completion uses the
+  same FQN candidate chain as reference resolution (useClass aliases,
+  global fallback); `{?a || b}` no longer triggers pipe-style completion;
+  `{@…}`/`{%…}` loop tags offer expression completion; Find Usages matches
+  PHP's case-insensitive function names and reports multiple usages within
+  one element.
+- **Missing loop name is reported** — `{loop}` / `{foreach}` with no
+  argument (a compile-time fatal) now gets an ERROR annotation.
+- Settings polish: the formatter-class field no longer leaves the Apply
+  button armed after trimming; duplicate `projectService` registration
+  removed; the `elif` live template inserts the compiler-supported
+  `{:cond}` form instead of unsupported `{elseif}`.
+
+### Changed
+
+- **Formatter class lookup is compiler-strict** — the configured formatter
+  class now resolves as an absolute FQN only (the compiler emits
+  `use <formatter> as _F` from the root namespace). The old
+  namespace-prefixed and simple-name fallbacks could report
+  formatter dispatch for a class the compiled template never calls.
+
+### Performance
+
+- **One scan per analysis per highlighting pass** — the inspections,
+  annotators, folding, highlight-usages, and parameter-info paths each
+  re-scanned the whole file independently (7–12 full scans per pass, some
+  with PHP-index lookups). Scope analysis, block pairing, argument
+  analysis, and template/comment ranges are now computed once per document
+  state and shared (`SkyTemplateRangeCache` lazies + file-level cached
+  values), with cache-invalidation regression tests.
+
 ## [1.2.3] — 2026-07-17
 
 Formatter-class method matching for pipe filters (`{var|func}`).

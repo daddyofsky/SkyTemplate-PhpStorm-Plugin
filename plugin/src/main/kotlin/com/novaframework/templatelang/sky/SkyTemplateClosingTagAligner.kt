@@ -178,8 +178,10 @@ object SkyTemplateClosingTagAlignerLogic {
      * keeps each handler independently auditable.
      */
     private fun classifyKind(text: CharSequence, openOffset: Int, closeEndOffset: Int): Kind {
-        val bodyStart = openOffset + 1
-        val bodyEnd = closeEndOffset - 1
+        val (innerOpen, innerCloseEnd) = SkyTemplateRanges.innerBraceBounds(text, openOffset, closeEndOffset)
+            ?: return Kind.OTHER
+        val bodyStart = innerOpen + 1
+        val bodyEnd = innerCloseEnd - 1
         if (bodyEnd <= bodyStart) return Kind.OTHER
 
         var i = bodyStart

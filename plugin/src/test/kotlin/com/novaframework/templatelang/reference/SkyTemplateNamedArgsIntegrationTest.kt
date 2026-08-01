@@ -269,6 +269,51 @@ class SkyTemplateNamedArgsIntegrationTest : BasePlatformTestCase() {
             labels.none { it == "piped:" })
     }
 
+    // ── P2-14 / P3-2: named-arg reorder must not shift positional chips ────
+
+    /**
+     * `{name|pipeFn8=name=v, a}` — the compiler moves ALL named args after
+     * ALL positional ones (`array_merge($positional, $named)`), so `name=v`
+     * consumes NO positional slot even though it's written first. `a` is
+     * therefore PHP arg 1 (right after the auto-prepended pipe value at
+     * slot 0), not arg 2.
+     */
+    fun testInlayHints_pipe_namedArgBeforePositional_doesNotShiftPositionalChip() {
+        myFixture.addFileToProject(
+            "lib.php",
+            """
+            <?php
+            function pipeFn8(string ${'$'}piped, string ${'$'}a, string ${'$'}b) {}
+            """.trimIndent()
+        )
+        IndexingTestUtil.waitUntilIndexesAreReady(project)
+
+        val hints = collectHints("<p>{name|pipeFn8=label=v, a}</p>")
+        val labels = hints.map { it.text }
+        assertTrue("`a` must map to param[1] = `a:`, got $labels", labels.contains("a:"))
+        assertTrue("must NOT shift to param[2] = `b:`, got $labels", labels.none { it == "b:" })
+    }
+
+    // ── P3-4: pipe `Cls::method` static calls get inlay hints too ──────────
+
+    fun testInlayHints_pipeStaticMethod_positionalArgsGetChips() {
+        myFixture.addFileToProject(
+            "Fmt.php",
+            """
+            <?php
+            class Fmt {
+                public static function pad(string ${'$'}piped, int ${'$'}width) { return ${'$'}piped; }
+            }
+            """.trimIndent()
+        )
+        IndexingTestUtil.waitUntilIndexesAreReady(project)
+
+        val hints = collectHints("<p>{name|Fmt::pad=4}</p>")
+        val labels = hints.map { it.text }
+        assertTrue("expected `width:` chip on pipe static-method call, got $labels",
+            labels.contains("width:"))
+    }
+
     // ── 1.1.0: InlayProvider static-method off-by-one regression ───────────
 
     /**

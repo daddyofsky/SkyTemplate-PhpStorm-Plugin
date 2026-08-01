@@ -118,6 +118,32 @@ class SkyTemplateBlockPairingTest {
         assertEquals(0, r.orphanBranches.size)
     }
 
+    @Test fun wrappedDirectivesInsideWrappedCommentDoNotBreakPairing() {
+        // `<!--{? foo}-->` / `<!--{/}-->` INSIDE a `<!--{* … *}-->` comment
+        // are inert. The inner `<!--{/}-->` must not pop the live outer
+        // `{?}` frame, and the `{:}` / `{/}` after the comment must pair
+        // with it cleanly.
+        val text = """<!--{? outer}-->
+  <!--{*
+  <!--{? foo}-->
+  x
+  <!--{/}-->
+  *}-->
+  <!--{:}-->
+  y
+<!--{/}-->"""
+        val r = analyze(text)
+        assertEquals(0, r.unpairedOpens.size)
+        assertEquals(0, r.orphanBranches.size)
+    }
+
+    @Test fun plainDirectivesInsidePlainCommentDoNotBreakPairing() {
+        val text = "{?outer}\n{*\n{?foo}\nx\n{/}\n*}\n{:}\ny\n{/}"
+        val r = analyze(text)
+        assertEquals(0, r.unpairedOpens.size)
+        assertEquals(0, r.orphanBranches.size)
+    }
+
     @Test fun htmlWrappedUnpairedReportsOpen() {
         // `<!--{loop x}-->` with no closer.
         val r = analyze("<!--{loop x}-->\nbody\n")

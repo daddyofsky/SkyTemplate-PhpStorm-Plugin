@@ -18,11 +18,18 @@ import com.novaframework.templatelang.settings.TemplateLangSettings
  * global function is never invoked. The reference / completion layers use this
  * helper to apply the same formatter-first order.
  *
- * The `formatter` config value is a class-string handed to `method_exists`,
- * so unlike template-side identifiers it is not subject to `useClass` alias
- * expansion — only the configured-namespace prefix and the global namespace
- * are tried, plus a simple-name fallback matching the resolver's general
- * "namespace setting left at default" tolerance.
+ * The `formatter` config value is a class-string handed to `method_exists`
+ * via a plain `use {$formatter} as _F;` (SkyTemplateCompiler.php:229) — PHP's
+ * `use` always resolves from the root namespace regardless of the compiled
+ * file's own `namespace` declaration, so unlike template-side identifiers
+ * the configured-namespace prefix is never a valid candidate here, and no
+ * simple-name fallback across other namespaces applies either: `raw` already
+ * denotes an absolute FQN once prefixed with `\` (PHP normalises `use Foo` /
+ * `use \Foo` identically), so any class living under a different namespace
+ * than the one literally written is a class `method_exists()` would never
+ * see — matching it anyway would misrepresent which code the compiler
+ * actually dispatches to. It is also not subject to `useClass` alias
+ * expansion.
  */
 internal object SkyTemplateFormatterLookup {
 
@@ -31,15 +38,7 @@ internal object SkyTemplateFormatterLookup {
         val raw = settings.formatterClass.trimEnd('\\')
         if (raw.isEmpty()) return emptyList()
         if (raw.startsWith("\\")) return phpIndex.getClassesByFQN(raw)
-        val out = LinkedHashSet<PhpClass>()
-        val ns = settings.namespace.trim().trim('\\')
-        if (ns.isNotEmpty()) out += phpIndex.getClassesByFQN("\\$ns\\$raw")
-        out += phpIndex.getClassesByFQN("\\$raw")
-        if (out.isEmpty()) {
-            val simple = raw.substringAfterLast('\\')
-            if (simple.isNotEmpty()) out += phpIndex.getClassesByName(simple)
-        }
-        return out
+        return phpIndex.getClassesByFQN("\\$raw")
     }
 
     /**

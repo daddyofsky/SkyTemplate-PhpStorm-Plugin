@@ -33,7 +33,7 @@
   </template>
 
   <template name="elif"
-            value="{elseif $COND$}&#10;&#9;$END$"
+            value="{:$COND$}&#10;&#9;$END$"
             description="SkyTemplate elseif clause"
             toReformat="false"
             toShortenFQNames="false">

@@ -1,6 +1,7 @@
 package com.novaframework.templatelang.inspection
 
 import com.intellij.openapi.util.TextRange
+import com.intellij.psi.tree.IElementType
 import com.novaframework.templatelang.sky.SkyTemplateLexer
 import com.novaframework.templatelang.sky.SkyTemplateRanges
 import com.novaframework.templatelang.sky.SkyTemplateTokenTypes as T
@@ -16,7 +17,8 @@ import com.novaframework.templatelang.sky.SkyTemplateTokenTypes as T
  *   - [Code.LOOP_DEPTH_TOO_DEEP] — a loop-scope variable
  *     (`.var`, `..var`, `.var@N`) requests a parent-loop depth that exceeds
  *     the actual loop nesting at that position. Mirrors `parseLoopVar`'s
- *     `up = max(@N, scope_dots - 1)` formula vs `$this->depth`.
+ *     `up` formula vs `$this->depth`: `up = max(N, 1)` when `@N` is present
+ *     (bare `@` counts as `@1`), otherwise `up = leading_dots - 1`.
  *
  *   - [Code.RESERVED_OUTSIDE_LOOP] — `_index`, `_number`, `_key`, or
  *     `_value` (with optional `@N`) used outside an enclosing loop, where
@@ -184,6 +186,7 @@ object SkyTemplateScopeAnalyzer {
         var branchHasArg = false
         var headStart = -1
         var headEnd = -1
+        var isEscape = false
 
         while (lexer.tokenType != null) {
             val type = lexer.tokenType
@@ -195,12 +198,19 @@ object SkyTemplateScopeAnalyzer {
                     val word = slice.subSequence(lexer.tokenStart, lexer.tokenEnd).toString()
                     kind = when (word) {
                         "@", "%" -> TagKind.LOOP_OPEN
-                        "?", "?:", "&" -> TagKind.IF_OPEN  // `&` = refer is one-shot but block-stack-neutral; treat as IF for arg-only passes
+                        "?", "?:" -> TagKind.IF_OPEN
+                        "&" -> TagKind.ONE_SHOT  // refer is block-stack-neutral — compiler's tagRefer never touches arrBlock
                         ":" -> TagKind.BRANCH
                         "/" -> TagKind.CLOSE
                         "=", ";", "#", "+", "]", "\\" -> TagKind.ONE_SHOT
                         else -> TagKind.ONE_SHOT
                     }
+                    // `{\ … }` (escape directive) — the compiler's `escape`
+                    // dispatch arm never runs the body through `parseVarCommon`;
+                    // it emits the body as literal `{…}` text. So anything that
+                    // looks like a variable inside it (`.price@2`) is not a
+                    // real read and must not be validated as one.
+                    isEscape = word == "\\"
                     // For BRANCH, branchHasArg = whether non-whitespace follows before RBRACE.
                     if (kind == TagKind.BRANCH) {
                         branchHasArg = hasBodyAfter(slice, lexer.tokenEnd)
@@ -238,8 +248,9 @@ object SkyTemplateScopeAnalyzer {
         if (kind == null) return null
 
         // Re-lex from start to collect ALL variables within the tag.
-        // (The first pass left the lexer mid-stream.)
-        val varRefs = collectVariables(slice, baseOffset)
+        // (The first pass left the lexer mid-stream.) Skipped for escape
+        // tags — their body is literal output, not an expression.
+        val varRefs = if (isEscape) emptyList() else collectVariables(slice, baseOffset)
         val branchRange = if (headStart >= 0 && headEnd > 0) {
             TextRange(baseOffset + headStart, baseOffset + headEnd)
         } else {
@@ -252,12 +263,20 @@ object SkyTemplateScopeAnalyzer {
     /**
      * True if any non-whitespace, non-comment, non-RBRACE token sits between
      * [from] and the close of the tag.
+     *
+     * Mirrors the compiler's `$arg = preg_replace('/\h*\/\/.*$/', '', $arg)`
+     * strip: a trailing `//comment` (with any amount of preceding horizontal
+     * whitespace) removes everything from the `//` to the end of the arg
+     * BEFORE the compiler checks `if ($arg)`. So `{: // note}` has an empty
+     * arg after stripping — a bare else, not a conditional branch — even
+     * though raw text sits between `:` and `}`.
      */
     private fun hasBodyAfter(slice: CharSequence, from: Int): Boolean {
         var i = from
         while (i < slice.length) {
             val c = slice[i]
             if (c == '}') return false
+            if (c == '/' && i + 1 < slice.length && slice[i + 1] == '/') return false
             if (!c.isWhitespace()) return true
             i++
         }
@@ -272,6 +291,14 @@ object SkyTemplateScopeAnalyzer {
         var leadingDots = 0
         var dotsRangeStart = -1
         var dotsRangeEnd = -1
+        // Last non-whitespace token type seen, used to detect a DOT / ARROW /
+        // DBL_COLON member-access chain (`row._value`, `obj->_key()`,
+        // `Cls::_key`). The compiler matches the whole chain as a single
+        // var_array / method-call expression — the trailing identifier is a
+        // property/member name, not an independent variable read, so it must
+        // not be collected as a VarRef (it would otherwise be flagged as a
+        // reserved name used outside a loop).
+        var lastNonWsType: IElementType? = null
 
         while (lexer.tokenType != null) {
             val type = lexer.tokenType
@@ -283,6 +310,8 @@ object SkyTemplateScopeAnalyzer {
                     dotsRangeEnd = lexer.tokenEnd
                 }
                 T.IDENTIFIER, T.SCOPE_RESERVED -> {
+                    val precededByMemberAccess =
+                        lastNonWsType == T.DOT || lastNonWsType == T.ARROW || lastNonWsType == T.DBL_COLON
                     val nameStart = if (leadingDots > 0) dotsRangeStart else lexer.tokenStart
                     val identStart = lexer.tokenStart
                     val identEnd = lexer.tokenEnd
@@ -299,29 +328,34 @@ object SkyTemplateScopeAnalyzer {
                     var atDigits: String? = null
                     var atStart = -1
                     var atEnd = -1
+                    lastNonWsType = type
                     if (lexer.tokenType == T.AT) {
                         atStart = lexer.tokenStart
                         atEnd = lexer.tokenEnd
+                        lastNonWsType = T.AT
                         lexer.advance()
                         if (lexer.tokenType == T.NUMBER) {
                             atDigits = slice.subSequence(lexer.tokenStart, lexer.tokenEnd).toString()
                             atEnd = lexer.tokenEnd
+                            lastNonWsType = T.NUMBER
                             lexer.advance()
                         } else {
                             atDigits = ""  // bare `@`
                         }
                     }
                     // Build var-ref. nameRange covers leading dots + ident + (optional) @N.
-                    val rangeEnd = if (atEnd > 0) atEnd else identEnd
-                    refs.add(
-                        VarRef(
-                            leadingDots = leadingDots,
-                            atDigits = atDigits,
-                            isReserved = isReserved,
-                            nameRange = TextRange(baseOffset + nameStart, baseOffset + rangeEnd),
-                            atRange = if (atStart >= 0) TextRange(baseOffset + atStart, baseOffset + atEnd) else null,
+                    if (!precededByMemberAccess) {
+                        val rangeEnd = if (atEnd > 0) atEnd else identEnd
+                        refs.add(
+                            VarRef(
+                                leadingDots = leadingDots,
+                                atDigits = atDigits,
+                                isReserved = isReserved,
+                                nameRange = TextRange(baseOffset + nameStart, baseOffset + rangeEnd),
+                                atRange = if (atStart >= 0) TextRange(baseOffset + atStart, baseOffset + atEnd) else null,
+                            )
                         )
-                    )
+                    }
                     // Reset dot accumulator — already consumed.
                     leadingDots = 0
                     dotsRangeStart = -1
@@ -358,6 +392,7 @@ object SkyTemplateScopeAnalyzer {
                     leadingDots = 0
                 }
             }
+            if (type != T.WHITE_SPACE_INSIDE) lastNonWsType = type
             lexer.advance()
         }
         return refs
@@ -450,8 +485,9 @@ object SkyTemplateScopeAnalyzer {
                     "(needs depth $required, currently $current)."
             Code.LOOP_DEPTH_TOO_DEEP ->
                 "Loop-scope reference `$nameDescription` needs $required level(s) of loop nesting " +
-                    "but only $current is open at this position. The compiler clamps to depth 0 — " +
-                    "the resulting `\$v0[…]` / `\$i0` reads from undefined data."
+                    "but only $current is open at this position. The compiler clamps to depth 0, so " +
+                    "this resolves to `\$v0[…]` — the root-level template data — instead of the " +
+                    "intended parent-loop item."
             else -> "Loop-scope mismatch."
         }
     }

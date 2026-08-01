@@ -130,4 +130,77 @@ class SkyTemplateInspectionsIntegrationTest : BasePlatformTestCase() {
         myFixture.checkHighlighting(true, false, true)
     }
 
+    // ── P3-11: missing loop tag name (compiler throws) ──────────────────────
+
+    fun testLoopWithNoNameReportedInHtmlFile() {
+        // `SkyTemplateCompiler::tagLoop` throws 'Loop tag name is missing'
+        // when `$arg` is empty. `{loop}` (no argument at all) hits it.
+        ensureEnabled()
+        myFixture.configureByText(
+            "a.html",
+            "<body><error descr=\"Loop tag name is missing\">{loop}</error>body{/}</body>",
+        )
+        myFixture.checkHighlighting(true, false, true)
+    }
+
+    fun testLoopWithOnlyWhitespaceNameReportedInHtmlFile() {
+        // `{loop  }` — whitespace-only argument, same as no argument once trimmed.
+        ensureEnabled()
+        myFixture.configureByText(
+            "a.html",
+            "<body><error descr=\"Loop tag name is missing\">{loop  }</error>body{/}</body>",
+        )
+        myFixture.checkHighlighting(true, false, true)
+    }
+
+    fun testLoopAtPrefixWithNoNameReportedInHtmlFile() {
+        // `{@}` aliases to `loop` in the compiler's tagAlias table — same throw.
+        ensureEnabled()
+        myFixture.configureByText(
+            "a.html",
+            "<body><error descr=\"Loop tag name is missing\">{@}</error>body{/}</body>",
+        )
+        myFixture.checkHighlighting(true, false, true)
+    }
+
+    fun testLoopPercentPrefixWithNoNameReportedInHtmlFile() {
+        // `{%}` also aliases to `loop`.
+        ensureEnabled()
+        myFixture.configureByText(
+            "a.html",
+            "<body><error descr=\"Loop tag name is missing\">{%}</error>body{/}</body>",
+        )
+        myFixture.checkHighlighting(true, false, true)
+    }
+
+    fun testEachWithNoNameReportedInHtmlFile() {
+        // `each` also aliases to `loop` in the compiler's tagAlias table.
+        ensureEnabled()
+        myFixture.configureByText(
+            "a.html",
+            "<body><error descr=\"Loop tag name is missing\">{each}</error>body{/}</body>",
+        )
+        myFixture.checkHighlighting(true, false, true)
+    }
+
+    fun testLoopWithNameNotReported() {
+        ensureEnabled()
+        myFixture.configureByText("a.html", "<body>{loop xs as x}body{/}</body>")
+        myFixture.checkHighlighting(true, false, true)
+    }
+
+    fun testLoopAtPrefixWithNameNotReported() {
+        ensureEnabled()
+        myFixture.configureByText("a.html", "<body>{@xs}body{/}</body>")
+        myFixture.checkHighlighting(true, false, true)
+    }
+
+    fun testForeachWithNoArgNotReported() {
+        // `foreach` / `for` / `while` do NOT throw on a missing argument in
+        // the compiler (only `tagLoop` does) — must stay in scope.
+        ensureEnabled()
+        myFixture.configureByText("a.html", "<body>{foreach}body{/}</body>")
+        myFixture.checkHighlighting(true, false, true)
+    }
+
 }

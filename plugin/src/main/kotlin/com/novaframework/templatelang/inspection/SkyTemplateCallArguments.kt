@@ -3,16 +3,20 @@ package com.novaframework.templatelang.inspection
 import com.intellij.openapi.project.DumbService
 import com.intellij.openapi.util.TextRange
 import com.intellij.psi.PsiFile
+import com.intellij.psi.util.CachedValueProvider
+import com.intellij.psi.util.CachedValuesManager
+import com.intellij.psi.util.PsiModificationTracker
 import com.intellij.psi.xml.XmlFile
 import com.jetbrains.php.PhpIndex
 import com.jetbrains.php.lang.psi.elements.Function as PhpFunction
 import com.jetbrains.php.lang.psi.elements.Method as PhpMethod
 import com.jetbrains.php.lang.psi.elements.Parameter as PhpParameter
 import com.jetbrains.php.lang.psi.elements.PhpClass
+import com.novaframework.templatelang.reference.SkyTemplateFormatterLookup
 import com.novaframework.templatelang.settings.TemplateLangFileFilter
 import com.novaframework.templatelang.settings.TemplateLangSettings
 import com.novaframework.templatelang.sky.SkyTemplateFile
-import com.novaframework.templatelang.sky.SkyTemplateRanges
+import com.novaframework.templatelang.sky.SkyTemplateRangeCache
 
 /**
  * File-level analyser for Phase 3 argument-validation inspections. Walks every
@@ -73,13 +77,36 @@ object SkyTemplateCallArguments {
     fun analyze(file: PsiFile): List<Diagnostic> {
         if (file !is XmlFile && file !is SkyTemplateFile) return emptyList()
         if (!TemplateLangFileFilter.shouldProcess(file)) return emptyList()
-        val project = file.project
-        if (DumbService.isDumb(project)) return emptyList()
-        val settings = TemplateLangSettings.getInstance(project)
-        val text = file.text
-        if (text.length < 3 || '{' !in text) return emptyList()
+        // Checked live on every call, never cached: a project mid-indexing
+        // must keep re-trying here, not get an empty result baked into the
+        // cache past the point the index becomes usable.
+        if (DumbService.isDumb(file.project)) return emptyList()
+        return analyzeCached(file)
+    }
 
-        val phpIndex = PhpIndex.getInstance(project)
+    /**
+     * [SkyTemplateArgumentCountInspection], [SkyTemplateNamedArgumentInspection],
+     * and [SkyTemplateArgumentAnnotator] each call [analyze] once per
+     * highlighting pass on the same file/root — this collapses their three
+     * full-text call-site scans + PhpIndex signature resolutions into one.
+     * `PsiModificationTracker.MODIFICATION_COUNT` is project-wide, so an
+     * edit to any PHP file that changes a resolved callee's signature
+     * invalidates this too, not just edits to this SkyTemplate file.
+     */
+    private fun analyzeCached(file: PsiFile): List<Diagnostic> =
+        CachedValuesManager.getCachedValue(file) {
+            val text = file.viewProvider.contents
+            val diagnostics = if (text.length < 3 || '{' !in text) {
+                emptyList()
+            } else {
+                computeDiagnostics(file, text)
+            }
+            CachedValueProvider.Result.create(diagnostics, file, PsiModificationTracker.MODIFICATION_COUNT)
+        }
+
+    private fun computeDiagnostics(file: PsiFile, text: CharSequence): List<Diagnostic> {
+        val settings = TemplateLangSettings.getInstance(file.project)
+        val phpIndex = PhpIndex.getInstance(file.project)
         val out = ArrayList<Diagnostic>()
         // Local memoisation: same callee can repeat in a file (e.g. `e()` in
         // every output position). PhpIndex itself caches but we save the
@@ -166,13 +193,27 @@ object SkyTemplateCallArguments {
     fun collectCalls(text: CharSequence): List<CallSite> {
         val out = ArrayList<CallSite>()
         if (text.isEmpty() || '{' !in text) return out
-        for (range in SkyTemplateRanges.computeTemplateRanges(text)) {
+        for (range in SkyTemplateRangeCache.get(text)) {
             val open = range.startOffset
             val close = range.endOffset
-            if (open + 1 < close && text[open + 1] == '*') continue   // skip comments
+            if (isCommentRange(text, open, close)) continue
             collectInTag(text, open, close, out)
         }
         return out
+    }
+
+    /**
+     * True when the `{ … }` / `<!--{ … }-->` [range] is a `{*…*}` comment —
+     * comments must not contribute call sites (a `{=foo()}` written as an
+     * example inside a comment isn't a real call). The plain form starts
+     * `{*` directly, but an HTML-wrapped comment (`<!--{* … *}-->`) starts
+     * `<!--`, so `text[open + 1]` alone misses it; find the range's actual
+     * `{` first and check the character right after it.
+     */
+    private fun isCommentRange(text: CharSequence, open: Int, close: Int): Boolean {
+        var i = open
+        while (i < close && text[i] != '{') i++
+        return i + 1 < close && text[i + 1] == '*'
     }
 
     private fun collectInTag(
@@ -180,10 +221,28 @@ object SkyTemplateCallArguments {
         open: Int,
         close: Int,
         out: MutableList<CallSite>,
+        scanFrom: Int = open + 1,
     ) {
-        var i = open + 1
+        var i = scanFrom
+        // Quote-aware: a `(` inside a string-literal argument (e.g.
+        // `foo("bar(")`) must never be mistaken for a nested call opener
+        // once we start recursing into argument ranges below — the outer
+        // parser convention (matchingRParen / pipeArgEnd / splitArguments)
+        // already treats quoted content as opaque, so this scan must match.
+        var inQuote = ' '
         while (i < close) {
             val c = text[i]
+            if (inQuote != ' ') {
+                if (c == '\\' && i + 1 < close) { i += 2; continue }
+                if (c == inQuote) inQuote = ' '
+                i++
+                continue
+            }
+            if (c == '\'' || c == '"') {
+                inQuote = c
+                i++
+                continue
+            }
             if (c.isLetter() || c == '_') {
                 val nameStart = i
                 while (i < close && (text[i].isLetterOrDigit() || text[i] == '_' || text[i] == '\\')) i++
@@ -221,6 +280,12 @@ object SkyTemplateCallArguments {
                         argListStart = argStart,
                         argListEnd = argEnd,
                     )
+                    // Recurse into the argument list so nested calls
+                    // (`{=trim(substr("x"))}` → `substr` too) are also
+                    // collected and validated, not just the outermost call.
+                    if (argEnd > argStart) {
+                        collectInTag(text, argStart, argEnd, out, scanFrom = argStart)
+                    }
                     i = if (argEnd < close) argEnd + 1 else argEnd
                     continue
                 }
@@ -231,19 +296,46 @@ object SkyTemplateCallArguments {
                 while (j < close && text[j].isWhitespace()) j++
                 val nameStart = j
                 while (j < close && (text[j].isLetterOrDigit() || text[j] == '_' || text[j] == '\\')) j++
-                val nameEnd = j
-                if (nameEnd > nameStart) {
+                val classEnd = j
+                // Optional `::method` suffix — `{var|Cls::m=…}` is compiler-
+                // supported (filter-name char class is `[\w\\:]*`) and is
+                // NEVER routed through the formatter (`method_exists`
+                // never matches a literal `Cls::m` string); it compiles to
+                // a direct static call. Consume it here so the scan reaches
+                // the trailing `=` — previously `j` stopped at the first
+                // `:` and the whole construct fell through unrecognised.
+                var methodStart = -1
+                var methodEnd = -1
+                if (j + 1 < close && text[j] == ':' && text[j + 1] == ':') {
+                    var m = j + 2
+                    val mStart = m
+                    while (m < close && (text[m].isLetterOrDigit() || text[m] == '_')) m++
+                    if (m > mStart) {
+                        methodStart = mStart
+                        methodEnd = m
+                        j = m
+                    }
+                }
+                if (classEnd > nameStart) {
                     var k = j
                     while (k < close && text[k].isWhitespace()) k++
                     if (k < close && text[k] == '=') {
-                        val between = text.substring(nameStart, nameEnd)
-                        if ("::" !in between) {
-                            val argStart = k + 1
-                            val argEnd = pipeArgEnd(text, argStart, close)
+                        val argStart = k + 1
+                        val argEnd = pipeArgEnd(text, argStart, close)
+                        val calleeClass: String?
+                        val calleeMethod: String
+                        if (methodStart >= 0) {
+                            calleeClass = text.substring(nameStart, classEnd).trimStart('\\').ifBlank { null }
+                            calleeMethod = text.substring(methodStart, methodEnd)
+                        } else {
+                            calleeClass = null
+                            calleeMethod = text.substring(nameStart, classEnd).trimStart('\\').substringAfterLast('\\')
+                        }
+                        if (calleeMethod.isNotBlank() && (methodStart < 0 || calleeClass != null)) {
                             out += CallSite(
                                 mode = CallMode.PIPE,
-                                calleeName = between.trimStart('\\').substringAfterLast('\\'),
-                                calleeClass = null,
+                                calleeName = calleeMethod,
+                                calleeClass = calleeClass,
                                 callStart = nameStart,
                                 argListStart = argStart,
                                 argListEnd = argEnd,
@@ -312,7 +404,18 @@ object SkyTemplateCallArguments {
      */
     data class ArgRange(val startInclusive: Int, val endExclusive: Int)
 
-    fun splitArguments(text: CharSequence, start: Int, end: Int): List<ArgRange> {
+    /**
+     * @param keepBlanks pipe-filter mode only. The compiler tokenises pipe
+     *   args with `str_getcsv` and keeps every blank token as a positional
+     *   `''` argument (`{v|fn=a,,b}` → 4 PHP args, not 2) — so once a comma
+     *   is present, blank buckets must NOT be dropped. The single case that
+     *   still collapses to zero buckets is a wholly-blank arg list with no
+     *   comma at all (`{v|fn=}`), which mirrors the compiler's separate
+     *   `$args === ''` bypass (direct `fn($code)` call, no tokenising).
+     *   Paren / static-method calls keep the default (`false`): a trailing
+     *   comma there is PHP-8 syntax sugar and adds no argument.
+     */
+    fun splitArguments(text: CharSequence, start: Int, end: Int, keepBlanks: Boolean = false): List<ArgRange> {
         val out = ArrayList<ArgRange>()
         if (start >= end) return out
         var depth = 0
@@ -339,9 +442,18 @@ object SkyTemplateCallArguments {
             i++
         }
         if (bucketStart < end) out += ArgRange(bucketStart, end)
-        // Drop empty buckets (e.g. trailing comma) — the existing inlay
-        // provider does this same filter.
-        return out.filter { isNonBlank(text, it.startInclusive, it.endExclusive) }
+        if (!keepBlanks) {
+            // Drop empty buckets (e.g. trailing comma) — the existing inlay
+            // provider does this same filter.
+            return out.filter { isNonBlank(text, it.startInclusive, it.endExclusive) }
+        }
+        // keepBlanks: preserve every bucket EXCEPT the single-bucket,
+        // wholly-blank case (no comma anywhere) — that one bucket represents
+        // "no args written at all", the compiler's `$args === ''` bypass.
+        if (out.size == 1 && !isNonBlank(text, out[0].startInclusive, out[0].endExclusive)) {
+            return emptyList()
+        }
+        return out
     }
 
     private fun isNonBlank(text: CharSequence, from: Int, to: Int): Boolean {
@@ -425,16 +537,20 @@ object SkyTemplateCallArguments {
         out: MutableList<Diagnostic>,
     ) {
         val pipeMode = call.mode == CallMode.PIPE
-        val buckets = splitArguments(text, call.argListStart, call.argListEnd)
+        val buckets = splitArguments(text, call.argListStart, call.argListEnd, keepBlanks = pipeMode)
         val classified = buckets.map { classify(text, it, pipeMode) }
 
         val calleeLabel = formatCallee(call)
 
-        // ── Rule e (positional after named) — sequence check, paren + pipe. ─
-        // HASH_PLACEHOLDER is neither positional nor named-marker for this
-        // rule (it's consumed by the pipe-input slot). Pure user positionals
-        // must not follow named ones.
-        run {
+        // ── Rule e (positional after named) — paren form only. ────────────
+        // The compiler's paren-call codegen passes arguments through
+        // verbatim in written order, so PHP 8's "positional after named"
+        // restriction applies there. Pipe filters are different: `parseFunction()`
+        // (SkyTemplateCompiler.php:874-887) always reorders as
+        // `array_merge($positional, $named)` before emitting the call, so
+        // `{var|str_pad=pad_type=1,10}` compiles fine regardless of the
+        // written order — flagging it here would be a false positive.
+        if (!pipeMode) {
             var sawNamed = false
             for (a in classified) {
                 when (a.kind) {
@@ -615,7 +731,30 @@ object SkyTemplateCallArguments {
                     .mapNotNull { it.findMethodByName(call.calleeName) }
                     .map { signatureOf(it.parameters) }
             }
-            CallMode.PAREN, CallMode.PIPE -> {
+            CallMode.PIPE -> {
+                if (call.calleeClass != null) {
+                    // `{var|Cls::m=…}` — a direct static-method call, never
+                    // routed through the formatter (`method_exists` never
+                    // matches a `Cls::m` string).
+                    lookupClasses(phpIndex, settings, call.calleeClass)
+                        .mapNotNull { it.findMethodByName(call.calleeName) }
+                        .map { signatureOf(it.parameters) }
+                } else {
+                    // Mirror the compiler's pipe-filter dispatch: a formatter
+                    // method with this name wins and the global function is
+                    // never called (see SkyTemplatePhpReference.multiResolve) —
+                    // so a same-named global function with a different arity
+                    // must not be unioned in, or it would produce a false
+                    // "missing required argument(s)" / "too many arguments".
+                    val formatterMethods = SkyTemplateFormatterLookup.findMethods(phpIndex, settings, call.calleeName)
+                    if (formatterMethods.isNotEmpty()) {
+                        formatterMethods.map { signatureOf(it.parameters) }
+                    } else {
+                        lookupFunctions(phpIndex, settings, call.calleeName).map { signatureOf(it.parameters) }
+                    }
+                }
+            }
+            CallMode.PAREN -> {
                 lookupFunctions(phpIndex, settings, call.calleeName)
                     .map { signatureOf(it.parameters) }
             }

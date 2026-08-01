@@ -44,7 +44,11 @@ class SkyTemplateAnnotator : Annotator {
         if (element !is PsiFile) return
         if (!TemplateLangFileFilter.shouldProcess(element)) return
 
-        val text = element.text
+        // `viewProvider.contents` (not `element.text`) — a stable CharSequence
+        // instance across calls within the same document state, so it hits
+        // SkyTemplateRangeCache instead of forcing a fresh full-file rescan
+        // every time the daemon re-annotates this file.
+        val text = element.viewProvider.contents
         if (text.length < 2 || '{' !in text) return
 
         // Phase 1: comment overlays (full ranges, including HTML-wrapped form).
@@ -54,7 +58,7 @@ class SkyTemplateAnnotator : Annotator {
         // SkyTemplate's comment colour rather than the HTML comment colour.
         // The plain `textAttributes(key)` form would merge with the HTML
         // attributes instead of overriding them.
-        val commentRanges = SkyTemplateRanges.computeCommentRanges(text)
+        val commentRanges = SkyTemplateRangeCache.getCommentRanges(text)
         if (commentRanges.isNotEmpty()) {
             val commentAttrs = EditorColorsManager.getInstance().globalScheme
                 .getAttributes(SkyTemplateColors.COMMENT)
@@ -88,7 +92,7 @@ class SkyTemplateAnnotator : Annotator {
         // the function body's `{` opens IN_TAG and stays there until the
         // template's `}`, so a flat scan would never see the template's `{`
         // as LBRACE. Per-range slicing avoids that entirely.
-        val templateRanges = SkyTemplateRanges.computeTemplateRanges(text)
+        val templateRanges = SkyTemplateRangeCache.get(text)
 
         // Phase 1.5: standalone escape literals — `{\` (no closing `}` on
         // the line) and `\}` (no opening `{` on the line). These DON'T

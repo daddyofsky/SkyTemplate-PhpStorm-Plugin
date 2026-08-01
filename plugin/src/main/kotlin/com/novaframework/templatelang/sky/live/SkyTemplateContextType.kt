@@ -23,8 +23,8 @@ import com.novaframework.templatelang.sky.SkyTemplateFileType
  * not template snippets, so we step out of the way. Inside `{*…*}` they're
  * typing a comment and a snippet expansion would be a surprise.
  *
- * The `contextId` (`SKY_TEMPLATE`) is referenced from
- * `liveTemplates/SkyTemplate.xml` via `<context><option name="SKY_TEMPLATE" value="true"/></context>`.
+ * The `contextId` (`SkyTemplate`) is referenced from
+ * `liveTemplates/SkyTemplate.xml` via `<context><option name="SkyTemplate" value="true"/></context>`.
  */
 class SkyTemplateContextType : TemplateContextType("SkyTemplate") {
 

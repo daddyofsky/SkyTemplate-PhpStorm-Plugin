@@ -278,7 +278,7 @@ class SkyTemplateLexer : LexerBase() {
             // The starts-with `_` check below stays case-sensitive: SCOPE_RESERVED
             // names (`_index`, `_GET`, …) are conventionally lower-snake / upper.
             currentToken = when {
-                word.lowercase() in T.KEYWORDS && atTagStart() -> T.TAG_KEYWORD
+                word.lowercase() in T.KEYWORDS && atTagStartStrict() -> T.TAG_KEYWORD
                 word.startsWith("_") -> T.SCOPE_RESERVED
                 // `c` followed immediately by a literal `.` is the SkyTemplate
                 // constant-scope marker (`{c.NAME}`). After identifier scan
@@ -459,6 +459,20 @@ class SkyTemplateLexer : LexerBase() {
         while (i >= startOffset && buffer[i].isWhitespace()) i--
         return i >= startOffset && buffer[i] == '{'
     }
+
+    /**
+     * True only when [tokenStart] sits DIRECTLY after `{` — no whitespace
+     * at all. Used for TAG_KEYWORD, whose compiler pattern (`PATTERN_TAG`'s
+     * `(?:loop|each|if|…)(?=\W)` alternative) requires the keyword to
+     * immediately abut the opening brace: `{loop x}` is a keyword tag,
+     * `{ loop x}` is not (the compiler falls through to its "invalid tag"
+     * branch, which re-parses the whole `{ loop x}` as a variable/expression
+     * body). Unlike [atTagStart] — which the single-char tag-prefix path
+     * still uses and intentionally skips leading whitespace — this must NOT
+     * walk back through whitespace.
+     */
+    private fun atTagStartStrict(): Boolean =
+        tokenStart > 0 && buffer[tokenStart - 1] == '{'
 
     /**
      * Are we at the beginning of a variable expression — either right

@@ -37,7 +37,7 @@ class SkyTemplateDuplicateElseInspection : LocalInspectionTool() {
         if (!TemplateLangFileFilter.shouldProcess(file)) return null
 
         val text = file.viewProvider.contents
-        val issues = SkyTemplateScopeAnalyzer.analyze(text)
+        val issues = SkyTemplateScopeAnalysisCache.get(text)
             .filter { it.code == Code.DUPLICATE_ELSE }
         if (issues.isEmpty()) return null
 

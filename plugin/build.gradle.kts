@@ -6,7 +6,7 @@ plugins {
 }
 
 group = "com.novaframework"
-version = "1.2.3"
+version = "1.2.4"
 
 repositories {
     mavenCentral()
@@ -54,6 +54,15 @@ intellijPlatform {
         }
         changeNotes.set(
             """
+            <h3>1.2.4</h3>
+            <ul>
+              <li><b>Fixed</b> &mdash; A wrapped comment <code>&lt;!--{* &hellip; *}--&gt;</code> whose body contains wrapped directives (<code>&lt;!--{? &hellip;}--&gt;</code> &hellip; <code>&lt;!--{/}--&gt;</code>) was split at the inner <code>}--&gt;</code>, leaving its closing <code>*}--&gt;</code> uncovered &mdash; the host&rsquo;s mismatched-HTML-comment errors on that tail were not suppressed. The whole comment (shell included) is now one range regardless of inner <code>}--&gt;</code> markers.</li>
+              <li><b>Fixed</b> &mdash; Wrapped directives inside a <code>{* &hellip; *}</code> / <code>&lt;!--{* &hellip; *}--&gt;</code> comment no longer participate in block pairing: an inner <code>&lt;!--{/}--&gt;</code> used to pop the enclosing live block&rsquo;s frame, so every <code>{:}</code> / <code>{/}</code> after the comment was reported as orphan / unmatched.</li>
+              <li><b>Fixed</b> (stability-audit wave) &mdash; JS <code>a || b</code> bodies mistaken for pipe-filter tags (real JS errors suppressed, Reformat protection misapplied); Ctrl+P dead for <code>Cls::method(</code> static calls (class-name off-by-one); false &ldquo;positional after named&rdquo; error on pipe filters (the compiler reorders pipe arguments); comment-scoped indent and comment skipping regressions for shell-extended <code>&lt;!--{*&hellip;*}--&gt;</code> ranges; comments containing PHP fragments discarded whole (comments now take precedence over PHP regions); CSS Nesting bodies (<code>&amp; .title {&hellip;}</code>, <code>:hover {&hellip;}</code>) misread as template tags; formatter-class dispatch missing from Ctrl+P, inlay hints, and argument inspections; <code>{&amp;block}</code> corrupting the scope-analyzer block stack; <code>{row._value}</code>-style member access flagged as a reserved variable; wrapped <code>&lt;!--{&hellip;}--&gt;</code> directives ignored by every indent-layer classifier (whole-file over-indent on Reformat).</li>
+              <li><b>Fixed</b> (audit wave, continued) &mdash; multi-range Reformat no longer drops earlier <code>&lt;script&gt;</code> protection snapshots; Move Statement out of a block re-indents the moved line; pipe-argument tooling (Ctrl+P, inlay hints, inspections) matches the compiler&rsquo;s <code>##</code> auto-prepend and positional/named reordering, validates static and nested calls, and ignores filter names the compiler ignores; <code>{ loop x}</code> is no longer coloured as a keyword; <code>{: // comment}</code> counts as a bare else; missing <code>{loop}</code> name is reported; <code>Cls::</code> completion and Find Usages align with reference resolution.</li>
+              <li><b>Changed</b> &mdash; The configured formatter class resolves as an absolute FQN only, matching the compiler&rsquo;s <code>use &hellip; as _F</code> dispatch; namespace-prefixed and simple-name fallbacks are removed.</li>
+              <li><b>Performance</b> &mdash; Scope analysis, block pairing, argument analysis, and template/comment ranges are computed once per document state and shared across inspections, annotators, folding, and caret-driven features (previously 7&ndash;12 full-file scans per highlighting pass).</li>
+            </ul>
             <h3>1.2.3</h3>
             <ul>
               <li><b>Added</b> &mdash; <i>Formatter class</i> setting (<i>Settings &rarr; Tools &rarr; SkyTemplate</i>) mirroring the SkyTemplate <code>formatter</code> config. Pipe filters (<code>{var|func}</code>) now resolve, navigate, and Find-Usage against the formatter class&rsquo;s methods first &mdash; matching the compiler&rsquo;s <code>method_exists</code> dispatch &mdash; and fall back to global functions otherwise. Pipe named args (<code>{x|fn=name=value}</code>) resolve against the formatter method&rsquo;s parameters, and completion after <code>{var|</code> offers the formatter&rsquo;s methods alongside global functions.</li>

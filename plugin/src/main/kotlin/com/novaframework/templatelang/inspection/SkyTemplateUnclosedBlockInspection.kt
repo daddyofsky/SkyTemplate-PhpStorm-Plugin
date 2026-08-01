@@ -8,6 +8,7 @@ import com.intellij.psi.PsiFile
 import com.novaframework.templatelang.settings.TemplateLangFileFilter
 import com.novaframework.templatelang.sky.SkyTemplateFileType
 import com.novaframework.templatelang.sky.SkyTemplateFoldingScanner
+import com.novaframework.templatelang.sky.SkyTemplateRangeCache
 
 /**
  * Reports SkyTemplate block tags (`{loop …}`, `{if …}`, `{foreach …}`,
@@ -15,10 +16,12 @@ import com.novaframework.templatelang.sky.SkyTemplateFoldingScanner
  * `{while …}`) that are opened but never closed — i.e. no matching `{/}`
  * or `{end}` is seen before end-of-file.
  *
- * **Scope**: registered for the SkyTemplate, HTML, and XML languages so
- * the inspection runs in `*.sky` files, in plain HTML / XML
- * host files where SkyTemplate directives are embedded, and in any
- * multi-tree file that mixes them. Orphan close tags (`{/}` / `{end}`
+ * **Scope**: registered ONLY for the SkyTemplate language, so this runs in
+ * `*.sky` files. HTML / XML host coverage for the same diagnostic is
+ * provided separately by [SkyTemplateStructuralAnnotator] — the platform's
+ * per-language inspection pipeline never dispatches a LocalInspectionTool
+ * to HTML / XML host files even when registered with `language="HTML"`, so
+ * an Annotator is used there instead. Orphan close tags (`{/}` / `{end}`
  * without an opener) remain intentionally silent — partial-template
  * fragments where the opener lives in another included file are
  * legitimate and should not be flagged.
@@ -41,7 +44,7 @@ class SkyTemplateUnclosedBlockInspection : LocalInspectionTool() {
     ): Array<ProblemDescriptor>? {
         if (!isApplicable(file)) return null
         val text = file.viewProvider.contents
-        val result = SkyTemplateFoldingScanner.analyze(text)
+        val result = SkyTemplateRangeCache.getBlockPairing(text)
         if (result.unpairedOpens.isEmpty()) return null
         return result.unpairedOpens.map { open ->
             val message = buildMessage(open.openText, open.openLine, open.suggestedClose)
@@ -57,13 +60,10 @@ class SkyTemplateUnclosedBlockInspection : LocalInspectionTool() {
 
     private fun isApplicable(file: PsiFile): Boolean {
         if (!TemplateLangFileFilter.shouldProcess(file)) return false
-        // Run for any file whose VFS file type is SkyTemplate (covers
-        // `*.sky`) or whose primary language is HTML / XML
-        // (covers host files where SkyTemplate constructs are embedded).
-        if (file.fileType === SkyTemplateFileType) return true
-        val lang = file.language
-        return lang === com.intellij.lang.html.HTMLLanguage.INSTANCE ||
-            lang === com.intellij.lang.xml.XMLLanguage.INSTANCE
+        // `language="SkyTemplate"` in plugin.xml already restricts checkFile
+        // dispatch to files whose PSI language is SkyTemplate (`*.sky`), so
+        // this is a settings-gate check, not a file-type branch.
+        return file.fileType === SkyTemplateFileType
     }
 
     private fun buildMessage(openText: String, openLine: Int, suggestedClose: Int): String {

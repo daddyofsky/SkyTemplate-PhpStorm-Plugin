@@ -599,8 +599,10 @@ object SkyTemplateEnterHandlerLogic {
      * the same recognition rules.
      */
     private fun classifyTagKind(text: CharSequence, openOffset: Int, closeEndOffset: Int): TagKind {
-        val bodyStart = openOffset + 1
-        val bodyEnd = closeEndOffset - 1
+        val (innerOpen, innerCloseEnd) = SkyTemplateRanges.innerBraceBounds(text, openOffset, closeEndOffset)
+            ?: return TagKind.OTHER
+        val bodyStart = innerOpen + 1
+        val bodyEnd = innerCloseEnd - 1
         if (bodyEnd <= bodyStart) return TagKind.OTHER
         var i = bodyStart
         while (i < bodyEnd && (text[i] == ' ' || text[i] == '\t')) i++

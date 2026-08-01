@@ -161,6 +161,14 @@ class SkyTemplateScopeAnalyzerTest {
         assertCodes(listOf(Code.DUPLICATE_ELSE), "{?cond}a{:}b{:other}c{/}")
     }
 
+    @Test fun elseWithOnlyTrailingCommentIsBareElseDuplicate() {
+        // `{: // note}` — the compiler strips `\h*//.*$` from the arg BEFORE
+        // checking `if ($arg)`, so this is a bare else (empty arg after
+        // strip), not a conditional branch. A bare `{:}` already consumed
+        // the final-branch slot, so this second one is a duplicate.
+        assertCodes(listOf(Code.DUPLICATE_ELSE), "{?a}x{:}y{: // note}z{/}")
+    }
+
     @Test fun multipleElseifAreFine() {
         // `{?a}{:b}{:c}{/}` — chain of elseif, no bare else in between. OK.
         assertTrue(codes("{?a}x{:b}y{:c}z{/}").isEmpty())
@@ -203,5 +211,68 @@ class SkyTemplateScopeAnalyzerTest {
         """.trimIndent()
         // `{.y@2}` requires depth 3, only 2 are open → flagged.
         assertCodes(listOf(Code.LOOP_DEPTH_TOO_DEEP), tpl)
+    }
+
+    // ── `{&block}` refer is block-stack-neutral (P2-4) ────────────────────────
+    // Compiler's `tagRefer` (SkyTemplateCompiler.php:388-409) never touches
+    // `arrBlock` — it's a one-shot include, not an opener. The analyser must
+    // not push an IF frame for it, or a following `{/}` pops the WRONG frame.
+
+    @Test fun referBetweenLoopAndItsCloseDoesNotShiftCloseTarget() {
+        // `{/}` must close the LOOP opened by `{@rows}`, not a phantom frame
+        // pushed for `{&cell}` — so `{_index}` after `{/}` is outside any loop.
+        assertCodes(listOf(Code.RESERVED_OUTSIDE_LOOP), "{@rows}{&cell}{/}{_index}")
+    }
+
+    @Test fun referBetweenDuplicateElsesStillDetectsDuplicate() {
+        // A `{&b}` sitting between the first bare `{:}` and a second one must
+        // not swallow the duplicate-else detection by pushing its own frame.
+        assertCodes(listOf(Code.DUPLICATE_ELSE), "{?a}x{:}y{&b}{:}z{/}")
+    }
+
+    @Test fun referAloneProducesNoIssues() {
+        assertTrue(codes("{&block}").isEmpty())
+    }
+
+    // ── DOT / ARROW / DBL_COLON trailing identifiers (P2-5) ───────────────────
+    // `row._value` / `obj->_key()` compile to a single var_array / method-call
+    // expression (`$v0['row']['_value']`, valid at any depth) — the trailing
+    // identifier is a property/member name, not an independent variable read,
+    // and must not be checked against the loop-scope / reserved-name rules.
+
+    @Test fun dotTrailingReservedNameOutsideLoopIsValid() {
+        assertTrue(codes("{row._value}").isEmpty())
+    }
+
+    @Test fun arrowTrailingReservedNameOutsideLoopIsValid() {
+        assertTrue(codes("{=obj->_key()}").isEmpty())
+    }
+
+    @Test fun bareReservedNameOutsideLoopStillReportsReservedOutsideLoop() {
+        // Control case — `_index` written standalone (no preceding DOT/ARROW)
+        // must still be flagged; the fix only exempts member-access targets.
+        assertCodes(listOf(Code.RESERVED_OUTSIDE_LOOP), "{_index}")
+    }
+
+    @Test fun dotTrailingIdentifierWithAtOutsideLoopIsValid() {
+        // `{user.roles@2}` — `roles` is a property-chain segment; the `@2`
+        // suffix on it must not trigger the redundant-`@`-on-non-loop warning.
+        assertTrue(codes("{user.roles@2}").isEmpty())
+    }
+
+    // ── Escape tag (`{\ … }`) neutralisation ──────────────────────────────────
+    // The compiler's `escape` dispatch arm never runs the tag body through
+    // `parseVarCommon` — it's emitted as literal `{…}` text. Anything that
+    // looks like a loop-scope / reserved variable inside it must not be
+    // validated as a real read.
+
+    @Test fun escapeTagBodyOutsideLoopProducesNoIssues() {
+        // `{\.price@2}` looks like a loop-scope var with a redundant `@0`-ish
+        // depth reference, but it's literal output — no LOOP_DEPTH_TOO_DEEP.
+        assertTrue(codes("{\\.price@2}").isEmpty())
+    }
+
+    @Test fun escapeTagBodyWithReservedNameProducesNoIssues() {
+        assertTrue(codes("{\\_index}").isEmpty())
     }
 }

@@ -72,32 +72,54 @@ class SkyTemplateReferencesSearchExecutor :
         val scope = SkyTemplateFilesScope(project).intersectWith(params.effectiveSearchScope)
 
         helper.processElementsWithWord(
-            { element, _ ->
-                walkAndCollectSkyRefs(element, target, consumer)
+            { element, offsetInElement ->
+                walkAndCollectSkyRefs(element, offsetInElement, target, consumer)
             },
             scope,
             name,
             UsageSearchContext.ANY,
-            true,  // case-sensitive — PHP symbol names are case-sensitive at the index
+            // PHP function / method / class names resolve case-insensitively
+            // (only constants and variables are case-sensitive in PHP), so
+            // `{=MyFunc()}` must be found when searching usages of `myFunc`.
+            // Safe to widen here: `ref.isReferenceTo(target)` below still
+            // requires an exact PSI-resolution match, so a differently-cased
+            // Constant/Field target simply won't match and is filtered out.
+            false,
         )
     }
 
     /**
-     * Walk leaf → parent on this candidate, collecting the first
-     * [SkyTemplatePhpReference] that resolves to [target]. Returns false
-     * to stop the outer search early when the consumer rejects (cancellation).
+     * Walk leaf → parent on this candidate, collecting the
+     * [SkyTemplatePhpReference] whose range covers this specific word
+     * occurrence and resolves to [target]. Returns false to stop the outer
+     * search early when the consumer rejects (cancellation).
+     *
+     * [offsetInElement] identifies WHICH occurrence of the word within
+     * [leaf] this callback invocation is for — `processElementsWithWord`
+     * invokes the callback once per occurrence, so a single host element
+     * covering two `{=foo()}` calls triggers two separate calls with
+     * different offsets. Previously this parameter was ignored and the walk
+     * always reported the FIRST matching ref found on the node, regardless
+     * of which occurrence triggered the callback — duplicating the first
+     * usage and silently dropping every other usage in the same element.
      */
     private fun walkAndCollectSkyRefs(
         leaf: PsiElement,
+        offsetInElement: Int,
         target: PsiElement,
         consumer: Processor<in PsiReference>,
     ): Boolean {
+        val absoluteOffset = leaf.textRange.startOffset + offsetInElement
         var node: PsiElement? = leaf
         while (node != null) {
+            val nodeStart = node.textRange.startOffset
             for (ref in node.references) {
                 if (ref is SkyTemplatePhpReference && ref.isReferenceTo(target)) {
-                    if (!consumer.process(ref)) return false
-                    return true  // one ref per candidate offset is enough
+                    val absoluteRefRange = ref.rangeInElement.shiftRight(nodeStart)
+                    if (absoluteRefRange.containsOffset(absoluteOffset)) {
+                        if (!consumer.process(ref)) return false
+                        return true
+                    }
                 }
             }
             if (node is PsiFile) break

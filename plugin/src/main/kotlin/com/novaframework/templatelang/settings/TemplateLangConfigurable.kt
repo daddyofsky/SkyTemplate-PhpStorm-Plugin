@@ -5,6 +5,7 @@ import com.intellij.openapi.options.SearchableConfigurable
 import com.intellij.openapi.project.Project
 import com.intellij.openapi.ui.DialogPanel
 import com.intellij.ui.components.JBTextArea
+import com.intellij.ui.components.JBTextField
 import com.intellij.ui.dsl.builder.AlignX
 import com.intellij.ui.dsl.builder.bindSelected
 import com.intellij.ui.dsl.builder.bindText
@@ -35,6 +36,16 @@ class TemplateLangConfigurable(private val project: Project)
 
         val fileExtensionsArea = JBTextArea(4, 40).apply { lineWrap = false }
         fileExtensionsArea.text = state.fileExtensions.joinToString("\n")
+
+        // Plain `bindText` compares the field's raw text against the (always
+        // trimmed) stored state, so a trailing/leading space left in the
+        // field reads as "still modified" right after Apply. Same
+        // explicit onApply/onReset/onIsModified trio as useClass /
+        // fileExtensions above, trimming on both sides of the comparison.
+        val formatterClassField = JBTextField(30).apply {
+            text = state.formatterClass
+            name = "skyTemplateFormatterClassField"
+        }
 
         return panel {
             row {
@@ -73,14 +84,15 @@ class TemplateLangConfigurable(private val project: Project)
                         }
                 }
                 row("Formatter class:") {
-                    textField()
-                        .bindText({ state.formatterClass }, { state.formatterClass = it.trim() })
-                        .columns(30)
+                    cell(formatterClassField)
                         .comment(
                             "Mirrors SkyTemplate <code>formatter</code> config. Pipe filters " +
                                 "(<code>{var|func}</code>) whose name is a method of this class " +
                                 "resolve to that method instead of a global function."
                         )
+                        .onApply { state.formatterClass = formatterClassField.text.trim() }
+                        .onReset { formatterClassField.text = state.formatterClass }
+                        .onIsModified { formatterClassField.text.trim() != state.formatterClass }
                 }
             }
 

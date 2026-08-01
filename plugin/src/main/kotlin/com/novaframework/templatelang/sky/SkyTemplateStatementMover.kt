@@ -78,6 +78,15 @@ class SkyTemplateStatementMover : LineMover() {
         val from = document.getLineStartOffset(startLine)
         val to = document.getLineEndOffset((endLineExclusive - 1).coerceIn(0, document.lineCount - 1))
 
+        // The line(s) the user's statement actually landed on: a swap
+        // exchanges content between `toMove` and `toMove2`'s line ranges, so
+        // the moved statement itself ends up at `toMove2`'s PRE-swap line
+        // range regardless of move direction (verified against the platform
+        // mover: swapping is symmetric, `toMove` always denotes the caret's
+        // original statement). Converted to the 1-based inclusive line
+        // numbering `reindent` uses internally.
+        val exactLines = info.toMove2?.let { (it.startLine + 1)..it.endLine }
+
         val indentStep = resolveIndentStep(file)
         // afterMove is not guaranteed to run inside a write action, so wrap
         // the re-indent edits explicitly (reentrant when one is already open).
@@ -86,6 +95,7 @@ class SkyTemplateStatementMover : LineMover() {
                 text = document.charsSequence,
                 range = TextRange(from, to),
                 indentStep = indentStep,
+                exactLines = exactLines,
             ) { f, t, replacement ->
                 document.replaceString(f, t, replacement)
                 SkyTemplateRangeCache.invalidate()

@@ -101,7 +101,12 @@ class SkyTemplatePhpImplicitUsageProvider : ImplicitUsageProvider {
             scope,
             name,
             UsageSearchContext.ANY,
-            true,  // case-sensitive — PHP function / class / constant names are case-sensitive at the index level
+            // PHP function / method / class names resolve case-insensitively
+            // (`{=MyFunc()}` must count as usage of `function myfunc()`).
+            // Already-documented false positives (name match without
+            // structural verification) make widening the match harmless —
+            // the bias here is "stays marked used", never "wrongly unused".
+            false,
         )
         return found
     }

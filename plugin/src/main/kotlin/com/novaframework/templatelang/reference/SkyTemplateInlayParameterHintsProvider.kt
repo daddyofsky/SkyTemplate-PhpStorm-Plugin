@@ -70,7 +70,7 @@ class SkyTemplateInlayParameterHintsProvider : InlayParameterHintsProvider {
             if (parameters.isEmpty()) continue
             val pipeMode = call.mode == CallMode.PIPE
             val classified = SkyTemplateCallArguments
-                .splitArguments(text, call.argListStart, call.argListEnd)
+                .splitArguments(text, call.argListStart, call.argListEnd, keepBlanks = pipeMode)
                 .map { SkyTemplateCallArguments.classify(text, it, pipeMode) }
             if (pipeMode) {
                 emitPipeHints(parameters, classified, out)
@@ -112,19 +112,23 @@ class SkyTemplateInlayParameterHintsProvider : InlayParameterHintsProvider {
 
     /**
      * Pipe-filter call: chip indexing must mirror the SkyTemplate compiler's
-     * exact `parseFunction` semantics, which preserves user token order and
-     * substitutes the pipe-input expression at the `##` slot:
+     * exact `parseFunction` semantics. The compiler splits tokens into a
+     * positional bucket and a named bucket (in token order), then emits
+     * `array_merge($positional, $named)` — so PHP's *positional* argument
+     * index only advances for POSITIONAL / `##` tokens; a NAMED token
+     * (`name=value`) consumes no positional slot at all, regardless of
+     * where it sits among the other tokens:
      *
-     *   - `##` ∈ tokens (user-explicit) → token i maps to PHP param[i].
-     *     The `##` token itself receives no chip (its slot is the
-     *     pipe-input value, not a user-visible argument).
-     *   - `##` ∉ tokens (compiler auto-prepends `##` at slot 0) → every
-     *     visible token shifts by +1; token i maps to PHP param[i+1].
+     *   - `##` ∈ tokens (user-explicit) → the positional counter starts at 0
+     *     (the `##` token itself occupies slot 0 but gets no chip).
+     *   - `##` ∉ tokens (compiler auto-prepends `##` at slot 0) → the
+     *     counter starts at 1 (slot 0 is already taken by the implicit
+     *     pipe-input value).
      *
      * This matches `{x|sprintf=%05d, ##}` mapping `%05d` to param[0] (the
-     * format string) and `{x|fn=a, b}` mapping `a, b` to param[1+]. Without
-     * the explicit-`##` discrimination, sprintf-style templates would show
-     * the wrong chip on the format slot.
+     * format string), `{x|fn=a, b}` mapping `a, b` to param[1+], and
+     * `{x|fn=name=v, a}` mapping `a` to param[1] (NOT param[2] — `name=v`
+     * consumes no positional slot even though it's the first token).
      */
     private fun emitPipeHints(
         parameters: List<PhpParameter>,
@@ -132,16 +136,18 @@ class SkyTemplateInlayParameterHintsProvider : InlayParameterHintsProvider {
         out: MutableList<InlayInfo>,
     ) {
         val hasExplicitHash = classified.any { it.kind == ArgKind.HASH_PLACEHOLDER }
-        // offset = 0 when `##` is written, +1 when the compiler will auto-prepend.
-        val offset = if (hasExplicitHash) 0 else 1
-        for ((tokenIdx, arg) in classified.withIndex()) {
-            val phpIdx = tokenIdx + offset
-            if (phpIdx >= parameters.size) break
+        // counter = 0 when `##` is written (it will consume slot 0 itself),
+        // 1 when the compiler auto-prepends `##` (slot 0 already taken).
+        var positionalIdx = if (hasExplicitHash) 0 else 1
+        for (arg in classified) {
             when (arg.kind) {
-                ArgKind.NAMED -> continue           // user already wrote the name
-                ArgKind.HASH_PLACEHOLDER -> continue // placeholder gets no chip
+                ArgKind.NAMED -> { /* consumes no positional slot, no chip */ }
+                ArgKind.HASH_PLACEHOLDER -> positionalIdx++ // no chip, but occupies its slot
                 ArgKind.POSITIONAL -> {
-                    out += InlayInfo(parameters[phpIdx].name + ":", arg.raw.startInclusive)
+                    if (positionalIdx < parameters.size) {
+                        out += InlayInfo(parameters[positionalIdx].name + ":", arg.raw.startInclusive)
+                    }
+                    positionalIdx++
                 }
             }
         }
@@ -163,7 +169,23 @@ class SkyTemplateInlayParameterHintsProvider : InlayParameterHintsProvider {
                     .firstNotNullOfOrNull { it.findMethodByName(call.calleeName) }
                     ?.parameters?.toList()
             }
-            CallMode.PAREN, CallMode.PIPE -> {
+            CallMode.PIPE -> {
+                if (call.calleeClass != null) {
+                    // `{var|Cls::m=…}` — direct static-method call, never
+                    // routed through the formatter.
+                    lookupClasses(phpIndex, settings, call.calleeClass)
+                        .firstNotNullOfOrNull { it.findMethodByName(call.calleeName) }
+                        ?.parameters?.toList()
+                } else {
+                    // Mirror the compiler's pipe-filter dispatch: a formatter
+                    // method with this name wins and the global function is
+                    // never called (see SkyTemplatePhpReference.multiResolve).
+                    val formatterMethods = SkyTemplateFormatterLookup.findMethods(phpIndex, settings, call.calleeName)
+                    (formatterMethods.firstOrNull() ?: lookupFunctions(phpIndex, settings, call.calleeName).firstOrNull())
+                        ?.parameters?.toList()
+                }
+            }
+            CallMode.PAREN -> {
                 lookupFunctions(phpIndex, settings, call.calleeName)
                     .firstOrNull()?.parameters?.toList()
             }

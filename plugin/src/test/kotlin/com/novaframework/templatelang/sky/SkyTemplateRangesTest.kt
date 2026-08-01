@@ -150,6 +150,58 @@ class SkyTemplateRangesTest {
         assertEquals("{c.LABEL}", r[0].substring(text))
     }
 
+    // ── P2-11: CSS Nesting vs `&` / `:` / `+` prefixed tags (policy 2) ──────
+
+    @Test fun cssNestingAmpersand_isNotTemplate() {
+        val text = "<style>.card { & .title { color: red; } }</style>"
+        assertTrue("CSS Nesting `&` must not register as template tag, got ${ranges(text)}",
+            ranges(text).isEmpty())
+    }
+
+    @Test fun cssNestingPseudoClass_isNotTemplate() {
+        val text = "<style>.btn { :hover { color: blue; } }</style>"
+        assertTrue("CSS Nesting `:hover` must not register as template tag, got ${ranges(text)}",
+            ranges(text).isEmpty())
+    }
+
+    @Test fun cssNestingSiblingCombinator_isNotTemplate() {
+        val text = "<style>.a { + .b { x: y; } }</style>"
+        assertTrue("CSS Nesting `+` must not register as template tag, got ${ranges(text)}",
+            ranges(text).isEmpty())
+    }
+
+    @Test fun referTag_stillRecognizedAsTemplate() {
+        val r = ranges("{&block}")
+        assertEquals(1, r.size)
+        assertEquals("{&block}", r[0].substring("{&block}"))
+    }
+
+    @Test fun bareElseBranch_stillRecognizedAsTemplate() {
+        val r = ranges("{:}")
+        assertEquals(1, r.size)
+    }
+
+    @Test fun caseBranch_stillRecognizedAsTemplate() {
+        val r = ranges("{:case}")
+        assertEquals(1, r.size)
+    }
+
+    @Test fun elvisFallback_stillRecognizedAsTemplate() {
+        val r = ranges("{?:fallback}")
+        assertEquals(1, r.size)
+    }
+
+    @Test fun executeTag_stillRecognizedAsTemplate() {
+        val r = ranges("{+file}")
+        assertEquals(1, r.size)
+    }
+
+    @Test fun referTagWithSelectorAfterSpace_isNotTemplate() {
+        // `& .title` (parent selector + space + selector) must NOT match the
+        // refer-tag identifier-chain shape, even with no nested brace.
+        assertFalse(SkyTemplateRanges.looksLikeTemplateBody("{& .title}", 0, 10))
+    }
+
     @Test fun looksLikeTemplateBody_directPredicate() {
         fun check(s: String) = SkyTemplateRanges.looksLikeTemplateBody(s, 0, s.length)
         // Positives — `{` immediately followed by tag content.
@@ -211,6 +263,25 @@ class SkyTemplateRangesTest {
 
     @Test fun jsWhileBody_isNotTemplate() {
         val text = "<script>while (true) { break; }</script>"
+        assertTrue(ranges(text).isEmpty())
+    }
+
+    /**
+     * Regression (P1-1): the `|` branch didn't consume the second `|` of
+     * `||`, so the next loop iteration saw a lone `|` and set `hasPipe`.
+     * That falsely qualified JS logical-or expressions as a `{var|filter}`
+     * template tag.
+     */
+    @Test fun jsLogicalOr_isNotTemplateBody() {
+        fun check(s: String) = SkyTemplateRanges.looksLikeTemplateBody(s, 0, s.length)
+        assertFalse(check("{ y = a || b; }"))
+        assertFalse(check("{ total = base || compute(x); }"))
+        // Single pipe still registers as a real pipe filter.
+        assertTrue(check("{var|trim}"))
+    }
+
+    @Test fun jsWhileBodyWithLogicalOr_isNotTemplate() {
+        val text = "<script>while (x) { y = y || z; }</script>"
         assertTrue(ranges(text).isEmpty())
     }
 
@@ -554,6 +625,52 @@ class SkyTemplateRangesTest {
         assertEquals("{name}", r[0].substring(text))
     }
 
+    @Test fun wrappedDirectiveShapeInsidePhpStringLiteral_isNotTemplate() {
+        // Plain `{?…}` / `{*…*}` bodies inside a PHP string are already
+        // excluded via computePhpRanges (see phpStringLiteralWithBraceQuestion
+        // above); the HTML-wrapped `<!--{…}-->` form needs the same PHP-region
+        // filter — without it a PHP string literal shaped like a wrapped
+        // directive registers as a real template range.
+        val text = "<?php \$s = '<!--{x}-->'; ?>\n<p>{name}</p>"
+        val r = ranges(text)
+        assertEquals(1, r.size)
+        assertEquals("{name}", r[0].substring(text))
+    }
+
+    // ── P2-10: comment wins over PHP overlap (policy 1) ────────────────────
+
+    @Test fun commentContainingPhpFragment_isKeptAsComment() {
+        // A genuine comment whose BODY happens to contain a PHP fragment
+        // must stay a comment — discarding it on overlap alone would
+        // un-neutralise the `{loop x}` inside, making it live again.
+        val text = "{* {loop x} <?=\$y?> old *}"
+        val comments = SkyTemplateRanges.computeCommentRanges(text)
+        assertEquals(1, comments.size)
+        assertEquals(text, text.substring(comments[0].startOffset, comments[0].endOffset))
+
+        // No LIVE `{loop x}` should register — the comment neutralises it.
+        val templateRanges = SkyTemplateRanges.computeTemplateRanges(text)
+        assertEquals(1, templateRanges.size)
+        assertEquals(text, text.substring(templateRanges[0].startOffset, templateRanges[0].endOffset))
+    }
+
+    @Test fun commentStartingInsidePhpBlock_isStillExcluded() {
+        // The `{*` open itself sits inside `<?php … ?>` — the existing
+        // exclusion (a `{* … *}`-shaped string literal inside PHP is not a
+        // SkyTemplate comment) must still hold under the new policy.
+        val text = "<?php \$s = '{* not a comment *}'; ?>\n<p>{name}</p>"
+        assertTrue(SkyTemplateRanges.computeCommentRanges(text).isEmpty())
+    }
+
+    @Test fun unterminatedCommentContainingPhpFragment_isKeptAsComment() {
+        // Same policy for the EOF best-effort (unterminated) path.
+        val text = "{* {loop x} <?=\$y?> never closed"
+        val comments = SkyTemplateRanges.computeCommentRanges(text)
+        assertEquals(1, comments.size)
+        assertEquals(0, comments[0].startOffset)
+        assertEquals(text.length, comments[0].endOffset)
+    }
+
     // ── computeDuplicateSuppressionRanges ─────────────────────────────────
 
     private fun dupBlocks(text: String) = SkyTemplateRanges.computeDuplicateSuppressionRanges(text)
@@ -621,6 +738,34 @@ class SkyTemplateRangesTest {
     @Test fun dupSuppress_noBlocks() {
         assertTrue(dupBlocks("<p>{name}</p>").isEmpty())
         assertTrue(dupBlocks("").isEmpty())
+    }
+
+    @Test fun dupSuppress_elvis_coversBodyEvenWithoutSeparateBranchTag() {
+        // {?:x}<div id="a"></div>{/} — tagElvis emits its own if/else pair
+        // from a SINGLE tag (no separate `{:}` follows), so this must be
+        // treated as branched from the start, same as `{?x}a{:}b{/}`.
+        val text = "{?:x}<div id=\"a\"></div>{/}"
+        val b = dupBlocks(text)
+        assertEquals(1, b.size)
+        assertEquals(TextRange(0, text.length), b[0])
+    }
+
+    @Test fun dupSuppress_elvis_offsetInsideRepeatedContentSuppressedBothTimes() {
+        val text = "{?:x}<div id=\"a\"></div>{/}{?:y}<div id=\"a\"></div>{/}"
+        val firstDiv = text.indexOf("<div")
+        val secondDiv = text.lastIndexOf("<div")
+        assertTrue(isSuppressed(text, firstDiv))
+        assertTrue(isSuppressed(text, secondDiv))
+    }
+
+    @Test fun dupSuppress_wrappedLoop_coversBody() {
+        // P2-3: a wrapped `<!--{@items}-->…<!--{/}-->` loop must classify
+        // the same as its plain form (bug was reading the `<!--` shell as
+        // the tag body instead of the inner `{@items}` / `{/}`).
+        val text = "<!--{@items}-->A<!--{/}-->"
+        val b = dupBlocks(text)
+        assertEquals(1, b.size)
+        assertEquals(TextRange(0, text.length), b[0])
     }
 
     // ── computeProtectedEmbeddedRanges (script/style verbatim protection) ──

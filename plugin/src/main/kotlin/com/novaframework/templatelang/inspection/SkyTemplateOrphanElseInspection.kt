@@ -8,15 +8,19 @@ import com.intellij.psi.PsiFile
 import com.novaframework.templatelang.settings.TemplateLangFileFilter
 import com.novaframework.templatelang.sky.SkyTemplateFileType
 import com.novaframework.templatelang.sky.SkyTemplateFoldingScanner
+import com.novaframework.templatelang.sky.SkyTemplateRangeCache
 
 /**
  * Reports SkyTemplate branch tags — `{else}`, `{elseif …}`, `{:}`,
  * `{:expr}` — that appear outside any enclosing block. The SkyTemplate
  * compiler cannot place such a branch and would fail.
  *
- * **Scope**: registered for the SkyTemplate, HTML, and XML languages so
- * the inspection runs in `*.sky` files as well as in HTML
- * and XML hosts where SkyTemplate directives are embedded.
+ * **Scope**: registered ONLY for the SkyTemplate language, so this runs in
+ * `*.sky` files. HTML / XML host coverage for the same diagnostic is
+ * provided separately by [SkyTemplateStructuralAnnotator] — the platform's
+ * per-language inspection pipeline never dispatches a LocalInspectionTool
+ * to HTML / XML host files even when registered with `language="HTML"`, so
+ * an Annotator is used there instead.
  *
  * Severity: ERROR.
  *
@@ -33,7 +37,7 @@ class SkyTemplateOrphanElseInspection : LocalInspectionTool() {
     ): Array<ProblemDescriptor>? {
         if (!isApplicable(file)) return null
         val text = file.viewProvider.contents
-        val result = SkyTemplateFoldingScanner.analyze(text)
+        val result = SkyTemplateRangeCache.getBlockPairing(text)
         if (result.orphanBranches.isEmpty()) return null
         return result.orphanBranches.map { orphan ->
             val message = "`{${orphan.keyword}}` outside `{if}` / `{loop}` block"
@@ -49,10 +53,10 @@ class SkyTemplateOrphanElseInspection : LocalInspectionTool() {
 
     private fun isApplicable(file: PsiFile): Boolean {
         if (!TemplateLangFileFilter.shouldProcess(file)) return false
-        if (file.fileType === SkyTemplateFileType) return true
-        val lang = file.language
-        return lang === com.intellij.lang.html.HTMLLanguage.INSTANCE ||
-            lang === com.intellij.lang.xml.XMLLanguage.INSTANCE
+        // `language="SkyTemplate"` in plugin.xml already restricts checkFile
+        // dispatch to files whose PSI language is SkyTemplate (`*.sky`), so
+        // this is a settings-gate check, not a file-type branch.
+        return file.fileType === SkyTemplateFileType
     }
 
     companion object {

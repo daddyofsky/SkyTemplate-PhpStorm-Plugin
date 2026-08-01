@@ -246,6 +246,19 @@ class SkyTemplateEnterHandlerIntegrationTest : BasePlatformTestCase() {
         )
     }
 
+    fun testSmartSplitFindsMatchingWrappedOpener() {
+        // P2-3: the pairing walk that locates the smart-split's matching
+        // opener must classify a wrapped `<!--{loop x}-->` opener the same
+        // as its plain form. Before the fix, the wrapped opener's body read
+        // as `!...` (inside the `<!--` shell) and classified as OTHER, so
+        // no opener was found and the smart split silently no-op'd.
+        val result = typeEnter("a.sky", "<!--{loop x}-->\n<caret>{/}")
+        assertEquals(
+            "<!--{loop x}-->\n    \n{/}",
+            result.trimEnd(),
+        )
+    }
+
     fun testDisabledSettingsSuppressesAutoClose() {
         // P-BUG-01: preprocessEnter/postProcessEnter must honor the master
         // enable switch, same as every other entry point gated by

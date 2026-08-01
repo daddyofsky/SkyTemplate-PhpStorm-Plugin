@@ -148,6 +148,37 @@ class SkyTemplateCommentRangesTest {
         assertTrue(r.any { text.substring(it.startOffset, it.endOffset) == "<!--{/}-->" })
     }
 
+    @Test fun wrappedCommentContainingWrappedDirectivesIsOneRange() {
+        // A wrapped comment whose BODY contains wrapped directives — the
+        // inner `}-->` of `<!--{? cond}-->` must not terminate the wrap
+        // detection early; the comment range must reach the outer `*}-->`.
+        val text = """<!--{*
+<!--{? cond}-->
+<li>x</li>
+<!--{/}-->
+*}-->"""
+        val r = comments(text)
+        assertEquals(1, r.size)
+        assertEquals(0, r[0].startOffset)
+        assertEquals(text.length, r[0].endOffset)
+    }
+
+    @Test fun wrappedDirectivesInsideCommentDoNotRegisterAsTemplateRanges() {
+        // Directives inside a comment are inert — only the comment range and
+        // the live directives AFTER it may appear as template ranges.
+        val text = "<!--{*\n<!--{? cond}-->\n<!--{/}-->\n*}-->\nmid\n<!--{? live}-->x<!--{/}-->"
+        val ranges = SkyTemplateRanges.computeTemplateRanges(text)
+        val commentEnd = text.indexOf("*}-->") + "*}-->".length
+        assertEquals(1, ranges.count { it.startOffset < commentEnd })
+        assertEquals(TextRange(0, commentEnd), ranges.first())
+        assertTrue(ranges.any { text.substring(it.startOffset, it.endOffset) == "<!--{? live}-->" })
+
+        // The trailing `-->` of `*}-->` must be covered so the HTML error
+        // filter can drop the host's mismatched-comment diagnostics.
+        val outerCloseAt = text.indexOf("*}-->")
+        assertTrue(SkyTemplateRanges.anyOverlap(ranges, outerCloseAt, outerCloseAt + 5))
+    }
+
     @Test fun anyOverlapWorksUnsorted() {
         val rs = listOf(TextRange(50, 60), TextRange(10, 20), TextRange(30, 40))
         // anyOverlap must not assume sorted ordering.

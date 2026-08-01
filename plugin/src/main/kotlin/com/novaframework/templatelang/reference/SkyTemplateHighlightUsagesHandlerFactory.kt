@@ -6,6 +6,9 @@ import com.intellij.openapi.editor.Editor
 import com.intellij.openapi.util.TextRange
 import com.intellij.psi.PsiElement
 import com.intellij.psi.PsiFile
+import com.intellij.psi.util.CachedValueProvider
+import com.intellij.psi.util.CachedValuesManager
+import com.intellij.psi.util.PsiModificationTracker
 import com.intellij.psi.xml.XmlFile
 import com.intellij.util.Consumer
 import com.novaframework.templatelang.settings.TemplateLangFileFilter
@@ -53,16 +56,16 @@ class SkyTemplateHighlightUsagesHandlerFactory : HighlightUsagesHandlerFactory {
         if (text.isEmpty() || '{' !in text) return null
 
         val offset = editor.caretModel.offset
+        val scan = scanCached(file, text)
+
         // Confirm cursor sits inside a real template tag — keeps non-template
         // braces (CSS rules, JS object literals) on default highlight behavior.
-        val templateRanges = SkyTemplateRanges.computeTemplateRanges(text)
-        if (templateRanges.none { it.containsOffset(offset) }) return null
+        if (scan.templateRanges.none { it.containsOffset(offset) }) return null
 
         // Find our ref covering the cursor. Use the same RefDetector pipeline
         // that powers Find Usages and Cmd+click, so what gets highlighted
         // matches what gets navigated.
-        val allRefs = SkyTemplateRefDetector.detect(text)
-        val refAtCursor = allRefs.firstOrNull { it.rangeInHost.containsOffset(offset) }
+        val refAtCursor = scan.references.firstOrNull { it.rangeInHost.containsOffset(offset) }
             ?: return null
 
         // Highlight every ref in the file with the same simple name + kind.
@@ -72,7 +75,7 @@ class SkyTemplateHighlightUsagesHandlerFactory : HighlightUsagesHandlerFactory {
         // local "occurrences of this symbol" highlighting.
         val targetName = simpleName(refAtCursor.nameInSource)
         val targetKind = refAtCursor.kind
-        val occurrences = allRefs
+        val occurrences = scan.references
             .filter { simpleName(it.nameInSource) == targetName && it.kind == targetKind }
             .map { it.rangeInHost }
 
@@ -81,6 +84,30 @@ class SkyTemplateHighlightUsagesHandlerFactory : HighlightUsagesHandlerFactory {
 
     private fun simpleName(qualified: String): String =
         qualified.substringAfterLast('\\')
+
+    private data class FileScan(
+        val templateRanges: List<TextRange>,
+        val references: List<SkyTemplateRefDetector.Ref>,
+    )
+
+    /**
+     * Same [CachedValuesManager] pattern as [SkyTemplateReferenceProvider.scanCached]
+     * — this factory's [createHighlightUsagesHandler] recomputes the template-tag
+     * scan + ref list on every caret move otherwise, duplicating a full-file
+     * lex that the reference / completion contributors already share via their
+     * own cached scans.
+     */
+    private fun scanCached(file: PsiFile, text: CharSequence): FileScan =
+        CachedValuesManager.getCachedValue(file) {
+            CachedValueProvider.Result.create(
+                FileScan(
+                    templateRanges = SkyTemplateRanges.computeTemplateRanges(text),
+                    references = SkyTemplateRefDetector.detect(text),
+                ),
+                file,
+                PsiModificationTracker.MODIFICATION_COUNT,
+            )
+        }
 
     private class Handler(
         editor: Editor,
