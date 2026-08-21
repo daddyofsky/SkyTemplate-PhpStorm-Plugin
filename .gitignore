@@ -45,8 +45,9 @@ replay_pid*
 logs/
 tmp/
 temp/
-_test/
-test/
+# Scratch dirs at the repo root only — `plugin/src/test/` is real source.
+/_test/
+/test/
 
 # ── Distribution artefacts (uncomment if you DO NOT want to ship the
 #    pre-built plugin zips alongside source):

@@ -35,7 +35,8 @@ import com.novaframework.templatelang.settings.TemplateLangFileFilter
  * Our own file-level comment overlay ([SkyTemplateAnnotator] phase 1) is an
  * INFORMATION highlight with a null description whose range spans the WHOLE
  * comment; it is preserved because [suppressInsideComment] only drops
- * description-less highlights that are a PROPER SUBSET of a comment range.
+ * description-less highlights that are a PROPER SUBSET of a comment range and
+ * never one of the plugin's own paint spans ([SkyTemplateCommentPaint]).
  */
 class SkyTemplateHtmlErrorFilter : HighlightInfoFilter {
 
@@ -170,10 +171,9 @@ class SkyTemplateHtmlErrorFilter : HighlightInfoFilter {
      *     Rainbow Brackets' per-tag `< >` colouring of the HTML PSI that the
      *     platform still builds inside a comment in `*.html` host files. These
      *     are dropped only when the highlight is a PROPER SUBSET of a comment
-     *     range. Our own file-level grey overlay
-     *     ([SkyTemplateAnnotator] phase 1) spans the WHOLE comment range, so
-     *     its range equals the comment range and is preserved — that overlay
-     *     is what paints the comment grey in the first place.
+     *     range, and never when its range is one of our own paint spans
+     *     ([SkyTemplateCommentPaint]) — the grey overlay, which normally spans
+     *     the whole comment, plus the TODO spans it is split around.
      */
     private fun suppressInsideComment(
         highlightInfo: HighlightInfo,
@@ -186,10 +186,16 @@ class SkyTemplateHtmlErrorFilter : HighlightInfoFilter {
         if (highlightInfo.description != null) {
             return SkyTemplateRanges.anyOverlap(commentRanges, hostStart, hostEnd)
         }
-        return commentRanges.any { r ->
+        val insideComment = commentRanges.any { r ->
             r.startOffset <= hostStart && hostEnd <= r.endOffset &&
                 !(r.startOffset == hostStart && r.endOffset == hostEnd)
         }
+        if (!insideComment) return false
+        // Cheapest last: only a highlight already destined for suppression
+        // pays for the TODO-pattern scan over the comment bodies.
+        return !SkyTemplateCommentPaint.isPaintedSpan(
+            hostFile.text, commentRanges, hostStart, hostEnd,
+        )
     }
 
     private fun isHtmlLikeFile(file: PsiFile): Boolean {

@@ -5,8 +5,8 @@ The same code path also handles **Template_** (xtac.net) — both engines share
 the directive surface this plugin cares about, so existing Template_ projects
 work without extra configuration.
 
-Works in dedicated `*.sky` partials and in `*.html` / `*.htm` / `*.xml` host
-files where SkyTemplate constructs are embedded.
+Works in dedicated `*.sky` partials and in `*.html` host files where
+SkyTemplate constructs are embedded.
 
 ## Features
 
@@ -15,6 +15,8 @@ files where SkyTemplate constructs are embedded.
 - Syntax highlighting for tags, variables, directives, comments, and operators
   (`*.sky` files and an annotator overlay in HTML hosts)
 - Brace matching, code folding for block tags, `{*…*}` block-comment toggle
+- TODO / FIXME inside `{*…*}` comments keeps the colours from
+  *Settings → Editor → TODO*
 - Smart Enter — auto-indent and auto-`{/}` after opening block tags
 - SkyTemplate-aware indentation on Enter, Tab, Paste, Reformat Code, and
   Move Statement Up/Down — including inside `<script>` / `<style>` bodies

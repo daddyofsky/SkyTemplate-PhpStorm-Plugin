@@ -4,6 +4,26 @@ All notable changes to the **SkyTemplate** PhpStorm plugin are recorded in
 this file. The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to semantic versioning.
 
+## [1.2.5] — 2026-08-21
+
+### Fixed
+
+- **TODO colours inside `{*…*}` comments** — a `TODO` / `FIXME` (or any
+  user-defined *Settings → Editor → TODO* pattern) written inside a
+  SkyTemplate comment in an `*.html` host file was painted grey like the
+  rest of the comment: the plugin's own comment overlay covers the whole
+  comment range, and on the wrapped `<!--{* … *}-->` shape (a real
+  `XmlComment`, so the platform does produce a TODO highlight there) the
+  host-noise filter dropped that highlight along with the HTML noise. The
+  overlay is now split around every TODO match, and each match is painted
+  with the attributes configured for its pattern. `*.sky` files were
+  unaffected — SkyTemplate's comment tokens reach the platform's TODO pass
+  through the parser definition.
+
+  Not covered: multi-line TODO continuation lines, and the TODO tool
+  window, which keeps listing only what the host file's indexer sees —
+  plain `<!-- … -->` comments in HTML hosts, every comment in `*.sky`.
+
 ## [1.2.4] — 2026-08-01
 
 Wrapped-comment fixes plus a full-codebase stability audit wave (five parallel

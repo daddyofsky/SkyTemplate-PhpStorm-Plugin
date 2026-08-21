@@ -58,15 +58,23 @@ class SkyTemplateAnnotator : Annotator {
         // SkyTemplate's comment colour rather than the HTML comment colour.
         // The plain `textAttributes(key)` form would merge with the HTML
         // attributes instead of overriding them.
+        //
+        // The overlay is painted per [SkyTemplateCommentPaint] segment rather
+        // than per comment range: a TODO / FIXME match inside the comment gets
+        // its configured TODO attributes and the grey overlay stops at its
+        // bounds, so the comment colour can't cover it.
         val commentRanges = SkyTemplateRangeCache.getCommentRanges(text)
         if (commentRanges.isNotEmpty()) {
             val commentAttrs = EditorColorsManager.getInstance().globalScheme
                 .getAttributes(SkyTemplateColors.COMMENT)
-            for (range in commentRanges) {
+            for (segment in SkyTemplateCommentPaint.segments(text, commentRanges)) {
                 val builder = holder.newSilentAnnotation(HighlightSeverity.INFORMATION)
-                    .range(range)
-                if (commentAttrs != null) {
-                    builder.enforcedTextAttributes(commentAttrs)
+                    .range(segment.range)
+                val enforced =
+                    if (segment.kind == SkyTemplateCommentPaint.Kind.TODO) segment.todoAttributes
+                    else commentAttrs
+                if (enforced != null) {
+                    builder.enforcedTextAttributes(enforced)
                 } else {
                     // Fallback: no resolved attrs (theme without BLOCK_COMMENT).
                     // The merging form still tints the range with the SkyTemplate

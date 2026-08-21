@@ -6,7 +6,7 @@ plugins {
 }
 
 group = "com.novaframework"
-version = "1.2.4"
+version = "1.2.5"
 
 repositories {
     mavenCentral()
@@ -54,6 +54,10 @@ intellijPlatform {
         }
         changeNotes.set(
             """
+            <h3>1.2.5</h3>
+            <ul>
+              <li><b>Fixed</b> &mdash; A <code>TODO</code> / <code>FIXME</code> (or any user-defined <i>Settings &rarr; Editor &rarr; TODO</i> pattern) written inside a <code>{* &hellip; *}</code> comment in an <code>*.html</code> host file now keeps its TODO colours. The plugin&rsquo;s comment overlay used to paint the whole comment grey &mdash; and on the wrapped <code>&lt;!--{* &hellip; *}--&gt;</code> shape the host&rsquo;s own TODO highlight was dropped by the comment noise filter &mdash; so the match was invisible. The overlay is now split around each match, which is painted with the pattern&rsquo;s configured attributes. <code>*.sky</code> files were already handled by the platform. Multi-line TODO continuation is not covered, and the TODO tool window still lists only what the host indexer sees (plain <code>&lt;!-- &hellip; --&gt;</code> comments in HTML hosts, every comment in <code>*.sky</code>).</li>
+            </ul>
             <h3>1.2.4</h3>
             <ul>
               <li><b>Fixed</b> &mdash; A wrapped comment <code>&lt;!--{* &hellip; *}--&gt;</code> whose body contains wrapped directives (<code>&lt;!--{? &hellip;}--&gt;</code> &hellip; <code>&lt;!--{/}--&gt;</code>) was split at the inner <code>}--&gt;</code>, leaving its closing <code>*}--&gt;</code> uncovered &mdash; the host&rsquo;s mismatched-HTML-comment errors on that tail were not suppressed. The whole comment (shell included) is now one range regardless of inner <code>}--&gt;</code> markers.</li>
